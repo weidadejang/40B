@@ -26,7 +26,7 @@
 #include "xspi.h"
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
-#define BASE_ADDRESS   0x0416b4
+
 
 static unsigned short CRC16( unsigned char * pucFrame, unsigned short usLen );
 //#define BASE_ADDRESS   0x048220
@@ -236,10 +236,9 @@ int SPI_Processing(int fd)
 			return -1;
 		}
 	}
-
+    /* WR TEST
 	Counters++;
 	sleep(1);
-
 	if(Counters > 5)
 	{
 		Counters = 0;
@@ -255,9 +254,8 @@ int SPI_Processing(int fd)
 			}
 		}
 	}
-
 	sleep(1);
-
+     */
 
 
 	return 0;
