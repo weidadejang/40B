@@ -45,7 +45,8 @@ static void prepare(const char *dbname) {
   db_create_table(db_handle, "EDTask");
   db_create_table(db_handle, "EDStatus");
   db_create_table(db_handle, "System");
-  db_create_table(db_handle, "WireStatus");
+  db_create_table(db_handle, "Extend");
+  db_create_table(db_handle, "WhiteList");
 
   /* Check if system conf exists. If not, restore the default. */
   System *SystemConf = get_system_conf();
@@ -55,10 +56,23 @@ static void prepare(const char *dbname) {
   }
 
   if (!SystemConf->Version) {
-    SystemConf->Version = 0x3434;
-    SystemConf->BACK1 = 0x29;
-    SystemConf->BACK2 = 0x01;
-    SystemConf->BACK3 = 0;
+    SystemConf->Version = 0x4b;
+    SystemConf->Ant1Freq = 1;
+    SystemConf->Ant1Args = 11;
+    SystemConf->Ant2Freq = 2;
+    SystemConf->Ant2Args = 22;
+    SystemConf->Ant3Freq = 3;
+    SystemConf->Ant3Args = 33;
+    SystemConf->Ant4Freq = 4;
+    SystemConf->Ant4Args = 44;
+    SystemConf->BACK1 = 0xaa;
+    SystemConf->BACK2 = 0xab;
+    SystemConf->BACK3 = 0xac;
+    SystemConf->StationVer = 0x4b;
+    SystemConf->SubPicSize = 4096;
+    SystemConf->Type = 0x05;
+    SystemConf->Mark = 0x06;
+    SystemConf->Num  = 10;
 
     SystemConf->MAC = realloc(SystemConf->MAC, 18);
     unsigned char mac[6];
@@ -77,70 +91,51 @@ static void prepare(const char *dbname) {
     db_cached_insert_row(db_handle, SystemConf);
     db_update_row(db_handle, SystemConf);
   }
-
-  for (int idx = 0; idx < MAX_SERIAL_NUM; idx++) {
-    int wire_belong = idx + 1;
-    WireStatus *wstatus = get_wire_status(wire_belong);
-    if (!wstatus) {
-      wstatus = db_alloc_row("WireStatus");
-      wstatus->WireID = wire_belong;
-      db_cached_insert_row(db_handle, wstatus);
-      db_update_row(db_handle, wstatus);
-    }
-  }
 }
 
 void sig_handler(int sig) {
   logger_info("get signal %d.\n", sig);
   restart = 1;
+  terminal();
 }
 
-// just for test
-// int test_task(void *opaque, void *data) {
-//   EDTask *task = data;
-//   logger_debug("EDID:%ld",task->EDID);
-//   return 0;
-// }
-
-int main(int argc, const char **argv) {
+int main(int argc, const char **argv)
+{
   time_t last_update = time(NULL);
-//  const char *dev[] = { "/dev/ttyACM0",
-//                        "/dev/ttyACM1",
-//                        "/dev/ttyACM2",
-//                        "/dev/ttyACM3"};
+  const char *dev[] = { "/dev/spidev0.0" ,"/dev/spidev2.0","/dev/spidev3.0","/dev/spidev1.0" }; // 先用一个进行测试
+  //const char *dev[] = { "/dev/spidev1.0" ,"/dev/spidev0.0" };
+  //const char *dev[] = { "/dev/spidev0.0"};
+
   if (argc < 2) {
-    printf("Usage: %s dbfile\n", argv[0]);
+    printf("Usage: %s dbfile [daemon]\n", argv[0]);
     exit(0);
   }
 
-#if 0
-  printf("goto daemon...\n");
-  daemon(0,0);
-#endif
+  //printf("sizeof unsigned    = %d\n", sizeof(unsigned));
+  //printf("sizeof unsigned int= %d\n", sizeof(unsigned int));
+
+  if (argc == 3) {
+    printf("goto daemon...\n");
+    daemon(0,0);
+  }
 
   openlog("baozi", LOG_PID|LOG_CONS, LOG_USER);
 
   pthread_key_create(&tls_key_threadnr, NULL);
   pthread_setspecific (tls_key_threadnr, "Main");
   logger_info("system run...");
-  print_sysinfo();
-  prepare(argv[1]);
 
-  // traverse_ed_task(NULL, test_task, NULL);
+  prepare(argv[1]);
 
   signal(SIGPIPE, SIG_IGN);
   signal(SIGINT, sig_handler);
   signal(SIGTERM, sig_handler);
   signal(SIGUSR1, sig_handler);
 
-  //start_serial_tasks(sizeof(dev)/sizeof(dev[0]), dev);
-
-  start_SPI10_task();
-
+  start_serial_tasks(sizeof(dev)/sizeof(dev[0]), dev);
   start_debug_task();
   start_gpio_task();
   start_net_task();
-
 
   while (!restart) {
     time_t now = time(NULL);
@@ -149,22 +144,25 @@ int main(int argc, const char **argv) {
         rwlock_rdlock();
         atomic_set(&task_update, 6); // 有任务更新时  task_update = 1
         db_cached_sync(db_handle, "EDTask");
-        db_cached_sync(db_handle, "WireStatus");
-        //db_cached_sync(db_handle, "EDStatus");
+        db_cached_sync(db_handle, "EDStatus");
+        db_cached_sync(db_handle, "WhiteList");
         rwlock_unlock();
       }
       last_update = now;
     }
     SLEEP(10, 0);
   }
-  //stop_serial_tasks();
+  stop_serial_tasks();
   db_cached_sync(db_handle, "EDTask");
-  db_cached_sync(db_handle, "WireStatus");
-  //db_cached_sync(db_handle, "EDStatus");
+  db_cached_sync(db_handle, "EDStatus");
+  db_cached_sync(db_handle, "WhiteList");
+  db_cached_sync(db_handle, "Extend");
   print_sysinfo();
   db_close(&db_handle);
   logger_info("system exit...");
   closelog();
 
+  // execv("/proc/self/exe", argv);
+  // printf("--------reboot the process failure!!!-----\n");
   return 0;
 }

@@ -53,7 +53,7 @@ void _hexbuf(const char* file, const int line, const char* head, uint8_t *buf, s
   for(int _i = 0; _i != _len; _i ++)
     snprintf(_str + strlen(_str), sizeof(_str) - strlen(_str), "%02x ", buf[_i]);
 
-  print_log(LOG_DEBUG, 0, "%s:%d %s[%d]:%s", file, line, head, size, _str);
+  print_log(LOG_INFO, 0, "%s:%d %s[%d]:%s", file, line, head, size, _str);
 }
 
 

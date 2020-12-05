@@ -3,77 +3,77 @@
 #include "list.h"
 #include "crc.h"
 #include "main.h"
+#include "sysinfo.h"
+#include "gpioThread.h"
+#ifdef USE_SERIAL
 #include "serial.h"
-#include "xspi.h"
+#else
+#define SerialSend(x,y,z) 0
+#endif
 
 #include <assert.h>
 #include <errno.h>
 #include <math.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/types.h>
+#include <linux/spi/spidev.h>
+//#include <linux/spi>
 
-#define PACKET_MAX_SIZE (55)
-#define MAX_LIST_NUM (500)
-#define PIC_SLICE_SIZE (4096)
+
+#define SPI_LONG_FRAME_SIZE   4096
+#define SPI_SHORT_FRANE_SIZE  57
+#define SPI_READ  0x80
+#define SPI_WRITE 0x00
+#define SPI_BASE        0
+#define SPI_TASK_BEGIN  1
+#define SPI_TASK_END    11
+
+typedef struct SPI_REG_OPT {
+  uint32_t addr:24;
+  uint32_t opt:8;
+} __PACKED SPI_REG_OPT;
+
+//const SPI_REG_OPT SpiRegList[] = {
+const SPI_REG_OPT SpiRegListTemp[] = {
+  { .addr = 0xf01884, .opt = SPI_READ  }, // status
+  { .addr = 0x301b84, .opt = SPI_WRITE }, // reg1
+  { .addr = 0x302b84, .opt = SPI_WRITE }, // reg2
+  { .addr = 0x303b84, .opt = SPI_WRITE },
+  { .addr = 0x304b84, .opt = SPI_WRITE },
+  { .addr = 0x305b84, .opt = SPI_WRITE },
+  { .addr = 0x306b84, .opt = SPI_WRITE },
+  { .addr = 0x307b84, .opt = SPI_WRITE },
+  { .addr = 0x308b84, .opt = SPI_WRITE },
+  { .addr = 0x309b84, .opt = SPI_WRITE },
+  { .addr = 0x30ab84, .opt = SPI_WRITE },
+  { .addr = 0x30bb84, .opt = SPI_WRITE }
+};
+
+/***************************************************************************/
+
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define CRC_TYPE uint16_t
-/*
- * 0x62 : sizeof(SerialHeader2) + sizeof(CRC_TYPE) +
- *        sizeof(Response0x62) * MAX_LIST_NUM
- * 0x67 : sizeof(SerialHeader2) + sizeof(CRC_TYPE) +
- *        sizeof(Response0x67) + PIC_SLICE_SIZE
- * Seems 5k Bytes is enough
- */
-#define PROTOBUF_MAX_SIZE (5 * 1024)
-// struct timeval start_time, end_time;
-
-struct Status0x62 {
-  uint32_t last_0x62_edid;
-  uint32_t wire_belong;
-  uint16_t req_num;
-};
-
-struct ProtoBuf {
-  uint8_t *data;
-  size_t size;      // max size
-  size_t len;       // cur size
-};
+#define TASK_NUM uint16_t
+#define SPI_PAYLOAD (SPI_LONG_FRAME_SIZE - sizeof(SPI_REG_OPT) - sizeof(uint8_t) - sizeof(TASK_NUM) - sizeof(CRC_TYPE))
 
 typedef struct SerialDev {
   const char *name;
-  FDSET fd;
+  int fd;
   pthread_t tid;
-  // per-ed tasks
   list *ed_list;
-  // 0x62 task status
-  struct Status0x62 status_0x62;
-  // output protocol buffer
-  struct ProtoBuf proto_buf;
 } SerialDev;
 
-typedef struct SerialHeader {
-  uint8_t fun_code;
-  uint8_t len;
-} __PACKED SerialHeader;
+#define true  0
+#define false 1
 
-typedef struct SerialHeader2 {
-  uint8_t fun_code;
-  uint16_t len;
-} __PACKED SerialHeader2;
-
-typedef struct Request0x60 {
-  uint32_t EDID;
-  uint16_t max_task_num;
-  uint8_t back1;
-  uint8_t back2;
-  uint8_t wire_belong;
-} __PACKED Request0x60;
-
-typedef struct Request0x62 {
-  uint16_t num;
-  uint8_t wire_belong;
-} __PACKED Request0x62;
-
-typedef struct Request0x6D {
+typedef struct StatusReg {
   uint32_t EDID;
   uint8_t cur_page;
   uint8_t page_mark;
@@ -105,153 +105,148 @@ typedef struct Request0x6D {
   uint8_t goods_mark;
   uint8_t time_mark;
   uint8_t reserved[4];
-  uint8_t wire_channel;
-  uint16_t wire_update_span;
-  uint32_t wire_cycle_time;
-  uint16_t wire_ed_num;
-} __PACKED Request0x6D;
+  uint8_t TaskTimeMark1;
+  uint8_t TaskTimeMark2;
+  uint8_t TaskTimeMark3;
+  uint8_t TaskTimeMark4;
+  uint16_t crc;
+} __PACKED StatusReg;
 
-typedef struct Request0x67 {
-  uint32_t EDID;
-  uint16_t cur_pkt;
-  uint8_t back[2];
-  uint8_t wire_belong;
-} __PACKED Request0x67;
 
-typedef struct Response0x62 {
-  uint32_t EDID;
+typedef struct BigHead{
   uint8_t funcode;
-  uint8_t pkt_num;
-} __PACKED Response0x62;
-
-
-typedef struct Response0x6B {
-  uint8_t store_mark;
-  uint8_t ap_type;
-  uint8_t sotre_ap_count;
-  uint8_t reserved[3];
-} __PACKED Response0x6B;
-
-typedef struct Response0x6D {
+  uint16_t len;
   uint32_t EDID;
+  uint16_t  total;
+  uint16_t cur;
+  uint8_t  Day;   //(11/30)
+  uint8_t  Hour;
+  uint8_t  Min;
+  uint8_t  Sec;
+  uint8_t  SmallXor;
+} __PACKED BigHead;
+
+typedef struct BigTask{
+  BigHead h;
+  uint8_t data[SPI_PAYLOAD - sizeof(BigHead) - 1];
+  uint8_t cs;
+} __PACKED BigTask;
+
+typedef struct BatchTask {
+  uint32_t EDID;
+  uint8_t  funcode;
+  uint8_t  mark;
+  uint16_t pkts;
+  uint8_t  Success;
+  uint8_t  Day;  //(11/30)
+  uint8_t  Hour;
+  uint8_t  Min;
+  uint8_t  Sec;
+} __PACKED BatchTask;
+
+typedef struct sTime {
   uint8_t year;
   uint8_t month;
   uint8_t day;
   uint8_t hour;
   uint8_t min;
-  uint8_t sec;                        //dongjing add 2019-12-06
-  Response0x6B global_par;
-  uint8_t powersave;
-  uint16_t start_time;
-  uint32_t duration;
-} __PACKED Response0x6D;
+  uint8_t sec;
+} __PACKED sTime;
 
-typedef struct Response0x67 {
+typedef struct GivenEDID {
   uint32_t EDID;
-  uint16_t pkt_num;
-  uint16_t pkt_idx;
-  uint8_t pic_slice[0];
-} __PACKED Response0x67;
+  uint8_t block;          // uint8_t 类型，意味着图片不能超过1M大小
+  uint8_t  mark;
+} __PACKED GivenEDID;
 
-typedef struct Response0x66 {
-  uint32_t EDID;
-  uint8_t page_mark;
-} __PACKED Response0x66;
+typedef struct ResponseProbe {
+  uint8_t key;
+  uint8_t reg;
+  uint8_t reserved;
+  uint8_t task_f1[SPI_TASK_END - SPI_TASK_BEGIN + 1];
+  uint8_t task_f2[SPI_TASK_END - SPI_TASK_BEGIN + 1];
+  uint16_t big_num;
+  uint16_t total;
+  uint16_t white;
+  sTime dt;
+  uint8_t mark;
+  uint8_t ap_type;
+  uint8_t ap_count;
+  uint8_t font_mark;
+  uint8_t bak[3];
+  GivenEDID which; // 指定要哪一个特定EDID，特定块时启用
+  uint8_t page;
+} __PACKED ResponseProbe;
 
-typedef struct Response0x65 {
-  uint32_t EDID;
-  uint8_t black_mark;
-} __PACKED Response0x65;
+typedef struct SpiProbeFrame {
+  SPI_REG_OPT head;
+  ResponseProbe rp;
+  uint16_t crc;
+} __PACKED SpiProbeFrame;
 
 
-typedef struct Response0x64 {
-  uint32_t EDID;
-  uint8_t LedMark;
-  uint8_t Led1Mark;
-  uint8_t Led2Mark;
-  uint8_t Led3Mark;
-  uint8_t Led4Mark;
-} __PACKED Response0x64;
+typedef struct SpiFrame {
+  SPI_REG_OPT head;
+  uint8_t  key;
+  uint16_t num;  // 拆分图片帧时 = 0xffff，空时 = 0 ， 有多个任务时 > 0
+  uint8_t data[SPI_PAYLOAD];
+  uint16_t crc;
+} __PACKED SpiFrame;
 
-typedef struct Response0x63 {
-  uint32_t EDID;
-  uint8_t nfc_mark;
-  char nfc_data[0];
-} __PACKED Response0x63;
+typedef struct TmpCache {
+  uint32_t edid;// 拆分的图片时保持所属ID
+  uint32_t idx; // 当前数据量
+  SpiFrame frame;
+} __PACKED TmpCache;
 
-/* 记录某个ED的任务分页状态 */
+struct CacheList {
+  TmpCache *cache;
+  uint8_t size; // cache[size]
+  uint8_t ap;   // 对应的天线编号
+  uint32_t task_num;
+  GivenEDID which; // 指定要哪一个特定EDID，特定块时启用
+  list *ed_list;   // 图片任务分帧处理时使用
+  uint32_t last_edid;
+};
+
 typedef struct EDProperty {
   uint32_t EDID;
-  struct PicTask {
-    void *data;
-    size_t len;
-    uint16_t cur_slice;
-    uint16_t slice_num;
-  } pic_task;
+  uint16_t block;
 } EDProperty;
 
 static void *ThreadSerial(void *arg);
-static int Send2Serial(SerialDev *dev);
-
-static int process_0x60(SerialDev*, void *, size_t);
-static int process_0x62(SerialDev*, void *, size_t);
-static int process_0x67(SerialDev*, void *, size_t);
-static int process_0x6D(SerialDev*, void *, size_t);
-static int process_0x6F(SerialDev*, void *, size_t);
-
-static int check_0x6B(uint32_t EDID);
-static int check_0x6F(uint32_t EDID);
-static int check_0x67(uint32_t EDID);
-static int check_0x66(uint32_t EDID);
-static int check_0x65(uint32_t EDID);
-static int check_0x64(uint32_t EDID);
-static int check_0x63(uint32_t EDID);
-
-static int send_0x6B(SerialDev*, uint32_t);
-static int send_0x6F(SerialDev*, uint32_t);
-static int send_0x67(SerialDev*, uint32_t);
-static int send_0x66(SerialDev*, uint32_t);
-static int send_0x65(SerialDev*, uint32_t);
-static int send_0x64(SerialDev*, uint32_t);
-static int send_0x63(SerialDev*, uint32_t);
-static int send_0x6D(SerialDev*, uint32_t);
-static int send_0x62(SerialDev*);
-
-static int pack_0x62(void *opaque, void *data);
+static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len);
+static void fill_response_probe(ResponseProbe *probe);
+static int query_white_list(void *opaque, void *data);
+static int process_status(SpiFrame *, uint8_t *);
+static int fill_task(struct CacheList *);
+static int fill_white(struct CacheList *);
+static int fill_task_mark(struct CacheList *);
+static int fill_big_task(struct CacheList *, uint32_t, uint8_t, void *, size_t, size_t, size_t,uint8_t,uint8_t,uint8_t,uint8_t);
+static int fill_to_cache(struct CacheList *, void *, size_t);
+static int fill_batch_task(struct CacheList *, uint32_t, uint8_t, uint8_t, uint16_t,int,int,int,int,int);
+static int get_tasks(void *, void *);
+static int get_tasks2(void *, void *);
+static uint8_t cs_sum(uint8_t *data, ssize_t size);
 
 static int ed_match(void *, void *);
 static void ed_free(void *);
-static struct EDProperty *ed_new(SerialDev *, uint32_t);
-
-// 所有支持的串口发上来的命令
-static const struct SerialRequest {
-  uint8_t fun_code;
-  int (*request_proc)(SerialDev*, void*, size_t);
-} request_list[] = {
-  {0x60, process_0x60}, // Query
-  {0x62, process_0x62}, // Query
-  {0x6D, process_0x6D}, // ED Status
-  {0x6F, process_0x6F}, // Task
-  {0x67, process_0x67}, // Pic T.B.C.
-};
-
-static const struct SerialResponse {
-  uint8_t fun_code;
-  int (*response_ready)(uint32_t);
-  int (*response_send)(SerialDev*, uint32_t);
-} response_list[] = {
-  {0x67, check_0x67, send_0x67}, // Priority Highest
-  {0x66, check_0x66, send_0x66},
-  {0x65, check_0x65, send_0x65},
-  {0x64, check_0x64, send_0x64},
-  {0x63, check_0x63, send_0x63},
-  {0x6B, check_0x6B, send_0x6B}, // Priority lowest
-  {0x6F, check_0x6F, send_0x6F}, // Seems to be redundant, same as 0x6B
-};
+static struct EDProperty *ed_new(list*, uint32_t);
 
 static int task_num = 0;
 static int task_exit = 0;
 static SerialDev *serial_devs;
+
+
+void print_buf(char *fmt, uint8_t *buf, int size)
+{
+	int i=0;
+	printf("\n--------------------------------------------------------------------------------\n");
+	printf("data:[%d]\n",size);
+	for(; i<size; i++) printf(fmt,buf[i]);
+	//printf("\n--------------------------------------------------------------------------------\n");
+}
+
 
 int start_serial_tasks(int ndev, const char *devs[]) {
   int idx, ret;
@@ -271,10 +266,6 @@ int start_serial_tasks(int ndev, const char *devs[]) {
       logger_error("Fail to start thread");
       return ret;
     }
-    serial_devs[idx].proto_buf.data = malloc(PROTOBUF_MAX_SIZE);
-    serial_devs[idx].proto_buf.size = PROTOBUF_MAX_SIZE;
-    serial_devs[idx].proto_buf.len = 0;
-    MEM_CHECK_R_1(serial_devs[idx].proto_buf.data);
   }
 
   return 0;
@@ -287,897 +278,832 @@ void stop_serial_tasks() {
   for (idx = 0; idx < task_num; idx++) {
     pthread_join(serial_devs[idx].tid, NULL);
     listRelease(serial_devs[idx].ed_list);
-    free(serial_devs[idx].proto_buf.data);
   }
   free(serial_devs);
 }
-
-static const struct SerialRequest* check_fun_code(uint8_t funcode) {
-  unsigned int idx = 0;
-  for (; idx < sizeof(request_list)/sizeof(request_list[0]); idx++)
-    if (funcode == request_list[idx].fun_code)
-      return request_list + idx;
-
-  return NULL;
-}
-
 static int check_crc(uint8_t *data, size_t len) {
-  CRC_TYPE crc1 = MBCRC16(data, len - sizeof(CRC_TYPE));
-  CRC_TYPE crc2 = *(uint16_t*)(data + len - sizeof(CRC_TYPE));
+  CRC_TYPE crc1 = MBCRC16(data, len);
+  CRC_TYPE crc2 = *(uint16_t*)(data + len);
 
   if (crc1 != crc2) {
     logger_debug("Expected crc = %hx, but got %hx.", crc1, crc2);
+    print_buf("%02X ",data, len);
     return 0;
   }
 
   return 1;
 }
 
+static int spidev_init(const char* dev_name, uint32_t speed, uint8_t bits, uint32_t mode) {
+  int fd = open(dev_name, O_RDWR);
+  if (fd < 0) {
+    logger_error("can't open device %s", dev_name);
+    return -1;
+  }
+  int ret;
+  if (mode) {// spi mode
+	  //SPI_IOC_WR_MODE32
+    ret = ioctl(fd, SPI_IOC_WR_MODE, &mode);
+    if (ret == -1) {
+      goto errout;
+    }
+  }
+  ret = ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+  if (ret == -1) {
+    goto errout;
+  }
+  ret = ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+  if (ret == -1) {
+    goto errout;
+  }
+
+  return fd;
+
+errout:
+  logger_error("Parameter setting failed. %s", dev_name);
+  close(fd);
+  return -1;
+}
+
+
+static uint8_t cs_sum(uint8_t *data, ssize_t size) {
+  uint8_t cs = 0;
+  for (int i=0; i != size; i ++)
+    cs ^= data[i];
+
+  return cs;
+}
+
+// static int check_cs(SpiFrame frame) {
+//   uint8_t cs = 0;
+//   for (size_t i=0; i != sizeof(frame.data); i ++)
+//     cs ^= frame.data[i];
+
+//   return (cs == frame.cs);
+// }
+
+static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
+{
+	struct spi_ioc_transfer tr;
+
+	memset(&tr, 0, sizeof(tr));
+	logger_hexbuf("SPI TX", tx, len);
+
+	tr.tx_buf = (unsigned long)(tx);
+	tr.rx_buf = (unsigned long)(rx);
+	tr.len = len;
+	if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 0) { // 射频芯片不回复时返回什么？
+	return -1;
+	}
+
+	logger_hexbuf("SPI RX", (const char*)rx, len);
+
+  return 0;
+}
+
+void spidev_reset(const char *dev)
+{
+  const char *spidev[][2] = {
+    {"/spidev0.0", U25_RESET},
+    {"/spidev1.0", U21_RESET},
+    {"/spidev2.0", U14_RESET},
+    {"/spidev3.0", U2_RESET}
+  };
+  static uint16_t Errtimes[4] = {0};
+
+  for (int i = 0; i < 4; i++) {
+    if (!strcmp(spidev[i][0], dev))
+    {
+    	if(Errtimes[i] < 500) Errtimes[i]++;
+    	printf("\nCurrent Err Occur at: %s   err time : %d  \n",dev,Errtimes[i]);
+
+    	if(Errtimes[i] >= 20){
+    		printf("Reset SPI DEVICE: %s   \n",dev);
+
+    		Errtimes[i] = 0;
+            //gpio_set_value(spidev[i][1], 0);
+            //sleep(1);
+            //gpio_set_value(spidev[i][1], 1);
+    	}
+    	printf("--------------------------------------------------------------------------------\n");
+
+      break;
+    }
+  }
+}
+// static void fill_probe_frame(SpiFrame *frame) {
+#define fill_probe_frame(frame) do { \
+  frame->head.addr = SpiRegList[SPI_BASE].addr; \
+  frame->head.opt = SPI_READ; \
+} while(0)
+
+#define SPI_REC_SEQUENCE_NOCRC(SEND, RECV) \
+    (RECV)->head.addr = 0x12345; \
+    spi_transfer(dev->fd, (uint8_t*)(SEND), (uint8_t*)(RECV), sizeof(*(SEND))); \
+    /*
+    if ((RECV)->head.addr || (RECV)->head.opt) { \
+      msleep(100); \
+      continue; \
+    }*/
+
+
+#define SPI_REC_SEQUENCE(SEND, RECV) \
+    (RECV)->head.addr = 0x12345; \
+    spi_transfer(dev->fd, (uint8_t*)(SEND), (uint8_t*)(RECV), sizeof(*(SEND))); \
+    if (!check_crc(((uint8_t*)(RECV)) + sizeof(SPI_REG_OPT), sizeof(*(RECV)) - sizeof(SPI_REG_OPT) - sizeof(CRC_TYPE) )) { \
+	  spidev_reset(thread_name); \
+      msleep(1000); \
+      continue; \
+    }
+
+int ReadSPIRegs(const char *dev_name, SPI_REG_OPT *SpiRegList, size_t size) {
+  char filename[64] = {0};
+  snprintf(filename, sizeof(filename), "./regs/%s", dev_name);
+  FILE *fp = fopen(filename, "r");
+  if (!fp) return -1;
+
+  char line[32];
+  uint8_t i = 0;
+
+  while(fgets(line, sizeof(line), fp) && i < size) {
+    if (strlen(line) < 3 || strlen(line) > 12) continue;
+    uint32_t v = 0;
+    sscanf(line, "%x", &v);
+    if (!v) continue;
+    SpiRegList[i++].addr = v;
+    logger_debug("SpiRegList[%d] = 0x%x", i - 1, v);
+  }
+
+  fclose(fp);
+
+  return i;
+}
+
 void *ThreadSerial(void *arg) {
   SerialDev *dev = arg;
-  uint16_t err_cnt = 0;
-  uint8_t tmpbuf[PACKET_MAX_SIZE] = {0};
-  int len = 0;
-  SerialHeader *header;
-  const struct SerialRequest *func;
   char *thread_name = strrchr(dev->name, '/');
-  int reopen_try_cnt = 0;
-  int last_time_of_reopen = 100;
+  SPI_REG_OPT SpiRegList[SPI_TASK_END];
 
   pthread_setspecific (tls_key_threadnr, thread_name + 1);
   logger_info("run...");
 
-OpenSerial:
-  // 重新打开串口时，串口号对应的设备可能已经改变，需要清空list
-  listEmpty(dev->ed_list);
   do {
-    dev->fd = serial_init(dev->name, "115200,8,1,n", 5, 1);
-    if (dev->fd.comfd < 0) {
-      logger_error("%s serial open failed.", dev->name);
+    dev->fd = spidev_init(dev->name, 2000000, 8, SPI_CPHA|SPI_CPOL);
+    if (dev->fd < 0) {
+      logger_error("%s spi open failed.", dev->name);
       sleep(3);
     }
-  } while(!task_exit && dev->fd.comfd < 0);
+  } while(!task_exit && dev->fd < 0);
+  if (ReadSPIRegs(thread_name + 1, &SpiRegList, SPI_TASK_END) < SPI_TASK_END) {
+    logger_error("Error reading configuration file!!!");
+    return NULL;
+  }
+
+  SpiProbeFrame *send_frame = calloc(1, sizeof(SpiProbeFrame));
+  SpiProbeFrame *recv_frame = calloc(1, SPI_LONG_FRAME_SIZE);
+  SpiFrame *recv_task_frame = calloc(1, sizeof(SpiFrame));
+
+  struct CacheList cachelist;
+  cachelist.size = ARRAY_SIZE(SpiRegList) - 1;  // 排除探测帧
+  cachelist.cache = (TmpCache *)calloc(cachelist.size, sizeof(TmpCache));
+  cachelist.ed_list = dev->ed_list;
+  cachelist.last_edid = 0;
+
+  ASSERT(cachelist.cache != NULL);
+  ASSERT(recv_task_frame != NULL);
+  ASSERT(recv_frame != NULL);
+  ASSERT(send_frame != NULL);
+
+  listEmpty(dev->ed_list);
 
   while (!task_exit) {
     // gettimeofday(&start_time, NULL);
-    len = SerialRec(dev->fd, tmpbuf, sizeof(tmpbuf), 10);
-    if (len > 0) logger_hexbuf("SERIAL RX", tmpbuf, len);
-    if (len < 0 || (unsigned int)len < sizeof(*header) + 2) {
-      if (len == 0) err_cnt++;
-      else err_cnt += 2;
-      if (++ err_cnt > 600) {
+    fill_probe_frame(send_frame);
+    memset(recv_frame, 0, sizeof(SpiProbeFrame));
 
-    	logger_debug("---------->>>>reopen_try_cnt: %d, last_time_of_reopen: %d", reopen_try_cnt, last_time_of_reopen);
-        logger_error("The serial port will be reopened.");
-        err_cnt = 0;
-        close_serial(&dev->fd);
-        if (reopen_try_cnt ++ > 1000) {
-          //system("reboot");
-          logger_info("--------system will be reboot------------");
-          restart = 1;
-        }
-        goto OpenSerial;
+    SPI_REC_SEQUENCE(send_frame, recv_frame)
+
+    ResponseProbe *probe = &recv_frame->rp;
+    ResponseProbe *resp_probe = &send_frame->rp;
+    // ------- 判断价签状态是否准备好 -----------
+    fill_response_probe(resp_probe);
+
+    cachelist.task_num = 0;
+    cachelist.which.EDID = 0;
+    for (int i = 0; i < cachelist.size; i ++) {
+      cachelist.cache[i].idx = 0;
+      cachelist.cache[i].edid = 0;
+      cachelist.cache[i].frame.num = 0;
+    }
+
+
+    if ((probe->key == 1 && probe->reg < SPI_TASK_END) ||
+        (probe->key == 7 && probe->reg == 0)) {
+      // key = 1 说明价签状态准备好了
+      // 读取寄存器块中的价签数据
+      for (int i = 0; i < probe->reg; i ++) {
+        cachelist.cache[i].frame.head = SpiRegList[SPI_TASK_BEGIN + i];
+        cachelist.cache[i].frame.head.opt = SPI_READ;
+
+        // SPI_REC_SEQUENCE_NOCRC((SpiFrame *)&cachelist.cache[i].frame, recv_task_frame)
+        spi_transfer(dev->fd, (uint8_t*)(&cachelist.cache[i].frame), \
+                              (uint8_t*)(recv_task_frame), \
+                              sizeof(cachelist.cache[i].frame));
+
+        process_status(recv_task_frame, &cachelist.ap);
+        //usleep(500000);
       }
+      if(probe->key == 1){
+      	//sleep(1);
+      	usleep(100000);
+      }
+
+	  // key = 7 说明射频芯片支持linux自由发送
+	  resp_probe->total = fill_task_mark(&cachelist);
+	  resp_probe->key = 0x02; // 批量任务
+
+    }
+	else if (probe->key == 3) { // key = 3 说明射频芯片请求任务，edid > 0 单个价签任务
+      // 射频请求某个edid的任务
+      cachelist.which = probe->which;
+      resp_probe->total = fill_task(&cachelist);
+      resp_probe->key = 0x04;
+    } else if (probe->key == 5) { // key = 5 说明射频芯片请求白名单任务
+      resp_probe->total = fill_white(&cachelist);
+      resp_probe->key = 0x06;
+    } else {
+      // 运行到此处说明 linux 发送的数据 射频芯片还未读取完
+      usleep(100000);
+      //sleep(5);
+      //logger_info("run...3");
       continue;
     }
-    err_cnt = 0;
-    if (last_time_of_reopen -- == 0) {
-      last_time_of_reopen = 10;
-      reopen_try_cnt = 0; // 重启串口如果能连续正常1000次
+    int i = 0;
+    for (; i < cachelist.size && i < SPI_TASK_END; i ++) {
+      if (!cachelist.cache[i].idx) break;
+      cachelist.cache[i].frame.head = SpiRegList[SPI_TASK_BEGIN + i];
+      cachelist.cache[i].frame.key = resp_probe->key;
+      // SPI Frame: Addr + R/W + DATA + CRC
+      // CRC = MBCRC16( DATA )
+      //cachelist.cache[i].frame.crc = MBCRC16((uint8_t*)&cachelist.cache[i].frame.num, offsetof(SpiFrame, crc) - offsetof(SpiFrame, num));
+      cachelist.cache[i].frame.crc = MBCRC16((uint8_t*)&cachelist.cache[i].frame.key, offsetof(SpiFrame, crc) - offsetof(SpiFrame, key));
+      spi_transfer(dev->fd, (uint8_t*)&cachelist.cache[i].frame, (uint8_t*)recv_frame, SPI_LONG_FRAME_SIZE);
+      //logger_info("run...44");
+
     }
-
-    header = (SerialHeader *)tmpbuf;
-    if (header->len > len) {
-      logger_debug("Not all data received. expect: %d, get: %d", header->len, len);
-      continue;
-    }
-
-    func = check_fun_code(header->fun_code);
-    if (!func) {
-      logger_debug("Unknown func code %hhx", header->fun_code);
-      continue;
-    }
-
-    if (!check_crc(tmpbuf, len))
-      continue;
-
-    func->request_proc(dev, tmpbuf + sizeof(SerialHeader),
-                       (size_t)len - sizeof(SerialHeader) - sizeof(CRC_TYPE));
+    resp_probe->reg = i; // 有效数据占用
+    send_frame->head = SpiRegList[SPI_BASE];
+    send_frame->head.opt = SPI_WRITE;
+    send_frame->crc = MBCRC16((uint8_t*)&send_frame->rp, sizeof(ResponseProbe));
+    spi_transfer(dev->fd, (uint8_t*)send_frame, (uint8_t*)recv_frame, sizeof(*send_frame));
+    usleep(100000);
+    //sleep(5);
+    //
+    // --- 发送完spi最后一帧后，执行任务情况统计  否则  sleep
+    //
+    //logger_info("run...4");
   }
 
+  //logger_info("run...5");
+
+  free(cachelist.cache);
+  free(recv_task_frame);
+  free(recv_frame);
+  free(send_frame);
   logger_info("exit...");
-  if (dev->fd.comfd > 0) close_serial(&dev->fd);
+  if (dev->fd > 0) close(dev->fd);
 
   return NULL;
 }
 
+static void fill_response_probe(ResponseProbe *probe) {
+  probe->key = 0x08;
+  probe->reg = 0x0;
+  probe->reserved = 0;
 
-/*------------------------------------------------------------------------------------------------
- *
- *------------------------------------------------------------------------------------------------ */
-void *SPI10_Communication(void *arg){
+  SysTime tm;
+  get_sys_time(&tm);
+  probe->dt.year = tm.year;
+  probe->dt.month = tm.month;
+  probe->dt.day = tm.day;
+  probe->dt.hour = tm.hour;
+  probe->dt.min = tm.minute;
+  probe->dt.sec = tm.second;
 
-	int fd = 0;
+  rwlock_rdlock();
 
+  System *system = get_system_conf();
+  probe->mark = system->Mark;
+  probe->ap_type = system->Type;
+  probe->ap_count = system->Num;
+  probe->font_mark = 0x00;
+  probe->bak[0] = system->BACK1;
+  probe->bak[1] = system->BACK2;
+  probe->bak[2] = system->BACK3;
+  probe->white = system->WhiteNum;
 
-	UNUSED(arg);
-	pthread_setspecific (tls_key_threadnr, "SPI10");
+  rwlock_unlock();
 
-	OpenSPI:
-	for(;;)
-	{
-		sleep(3);
-		logger_info("SPI configration...");
-		fd = SPI10_Configration();
-		if(fd < 0){
-		}
-		else{
-			break;
-		}
-	}
-
-
-	while(1)
-	{
-		int i = SPI_Processing(fd);
-		if(i < 0)
-		{
-			goto OpenSPI;
-		}
-		//logger_info("SPI configration...");
-		sleep(1);
-	}
-
-
-	return NULL;
 }
 
-/*------------------------------------------------------------------------------------------------
- *
- *------------------------------------------------------------------------------------------------ */
-void start_SPI10_task(void)
-{
-	  pthread_t pd;
-	  pthread_create(&pd, NULL, SPI10_Communication, NULL);
+static int fill_white(struct CacheList *cache) {
+  rwlock_rdlock();
+  traverse_white_list(&cache->last_edid, query_white_list, cache);
+  rwlock_unlock();
+
+  logger_info("------ fill white list [%d]-----------", cache->task_num);
+  return cache->task_num;
 }
 
 
-int process_0x60(SerialDev *dev, void *data, size_t len) {
-  Request0x60 *req = data;
+static int query_white_list(void *opaque, void *data) {
+  struct CacheList *cache = (struct CacheList*)opaque;
+  WhiteList *wl = data;
 
-  ASSERT(len == sizeof(*req));
-  logger_debug("Query from %#x, capacity: %u", req->EDID, req->max_task_num);
+  cache->last_edid = wl->EDID;
 
-  logger_info("request funcode:%#x", req->back1);
-  // 一次处理一个任务？？？
-  for(unsigned int idx = 0; idx < NELEMS(response_list); idx++) {
-    rwlock_rdlock();
-    int ret = response_list[idx].response_ready(req->EDID);
-    rwlock_unlock();
-    if ( ret > 0 && response_list[idx].fun_code == req->back1) //请求的功能码也对应
-      return response_list[idx].response_send(dev, req->EDID);
+  if (wl->Flag) {
+    return fill_to_cache(cache, &wl->EDID, 4);
   }
 
-  // 没有任何任务
-  return send_0x6B(dev, req->EDID);
+  return 0;
+}
+// // 如何实现优先图片任务或者优先大帧
+// static int PriorityFill()
+// {
+//   int max = 4000;
+//   // 1. 先遍历一遍图片任务，将图片大于max 的图片填入cache
+//   // 2. 如果cache没有被填满，则 遍历大于 max/2 的任务 
+// }
+//
+static int fill_task_mark(struct CacheList *cachelist) {
+
+  rwlock_rdlock();
+  traverse_ed_task(&cachelist->last_edid, get_tasks, cachelist);
+  rwlock_unlock();
+
+  return cachelist->task_num;
 }
 
-int process_0x62(SerialDev *dev, void *data, size_t len) {
-  Request0x62 *req = data;
-
-  ASSERT(len == sizeof(*req));
-  ASSERT(req->num != 0);
-
-  dev->status_0x62.req_num = req->num > MAX_LIST_NUM ? MAX_LIST_NUM : req->num;
-  dev->status_0x62.wire_belong = req->wire_belong;
-  return send_0x62(dev);
-}
-
-int process_0x67(SerialDev *dev, void *data, size_t len) {
-  Request0x67 *req = data;
-  listNode *node = listSearchKey(dev->ed_list, &req->EDID);
-  EDProperty *prop;
-
-  ASSERT(len == sizeof(*req));
-  ASSERT(node != NULL);
-
-  prop = node->value;
-  ASSERT(prop != NULL);
-  // no pic task or error occurs on cur task
-  if (!prop->pic_task.data || prop->pic_task.cur_slice != req->cur_pkt) {
-    logger_debug("Serial packet lost. cur %d, but got %d.", prop->pic_task.cur_slice, req->cur_pkt);
-    listDelNode(dev->ed_list, node);
-    return -ENOENT;
+static int fill_task(struct CacheList *cache) {
+  rwlock_rdlock();
+  if (cache->which.EDID) { // 单查
+    EDTask *task = get_ed_task(cache->which.EDID);
+    if (task) get_tasks2(cache, task);
+  } else {
+    traverse_ed_task(&cache->last_edid, get_tasks2, cache);
   }
+  rwlock_unlock();
 
-  // all data transfered
-  if (prop->pic_task.cur_slice == prop->pic_task.slice_num - 1) {
-    logger_debug("Pic transfer ending for %d", prop->EDID);
-    listDelNode(dev->ed_list, node);
-    return 0;
-  }
-
-  // Transfer next slice.
-  prop->pic_task.cur_slice++;
-  return send_0x67(dev, req->EDID);
+  return cache->task_num;
 }
 
-int process_0x6D(SerialDev *dev, void *data, size_t len) {
-  Request0x6D *req = data;
+
+static int process_status(SpiFrame *frame, uint8_t *ap) {
   EDStatus *status;
-  WireStatus *ws;
   time_t t = time(NULL);
   struct tm res;
-  int WireB = 0;
+  int taskstatus[5] = {0,0,0,0,0};
 
-  ASSERT(len == sizeof(Request0x6D));
-  ASSERT(req->EDID != 0);
-
-  // logger_info("EDID:%#x", req->EDID);
-  rwlock_wrlock();
-  status = get_ed_status(req->EDID);
-  if (!status) {
-    logger_info("New edid %08x found on serial %s\n", req->EDID, dev->name);
-    status = db_alloc_row("EDStatus");
-    if (!status) {
-      rwlock_unlock();
-      kill(getpid(), SIGUSR1);
-      logger_error("---------malloc failed--------");
-      return -1;
-    }
-    status->EDID = req->EDID;
-    db_cached_insert_row(db_handle, status);
-  }
-
-  status->CurPage = req->cur_page;
-  // logger_debug("status->PageMark:%#x req->PageMark:%#x", status->PageMark, req->page_mark);
-  status->PageMark = req->page_mark;
-  status->Page1Mark = req->page1_mark;
-  status->Page2Mark = req->page2_mark;
-  status->Page3Mark = req->page3_mark;
-  status->Page4Mark = req->page4_mark;
-  status->ScreenType = req->screen_type;
-  status->SignalQuality = req->signal_strength;
-  status->Voltage = req->voltage;
-  status->Temperature = req->tempur;
-  status->Factory = req->fact;
-  status->TimeoutCount = req->timeout;
-  status->LEDMark = req->led_mark;
-  status->NFCMark = req->nfc_mark;
-  status->Version = req->ver;
-  status->Blacklist = req->store_id;
-  status->Belong = req->wire_belog;
-
-  if (!status->StartTime)
-    status->StartTime = calloc(1, 20);
-  MEM_CHECK_R_1(status->StartTime);
-  snprintf(status->StartTime, 20, "%d-%d-%d %d:%d", req->start_year,
-          req->start_month, req->start_day, req->start_hour,
-          req->start_min);
-  if (!status->EndTime)
-    status->EndTime = calloc(1, 20);
-  MEM_CHECK_R_1(status->EndTime);
-  snprintf(status->EndTime, 20, "%d-%d-%d %d:%d", req->end_year,
-          req->end_month, req->end_day, req->end_hour,
-          req->end_min);
-  status->GoodsMark = req->goods_mark;
-  status->DateType = req->time_mark;
-  status->Back1 = req->reserved[0];
-  status->Back2 = req->reserved[1];
-  status->Back3 = req->reserved[2];
-  status->Back4 = req->reserved[3];
-
-  if (!status->LastTime)
-    status->LastTime = calloc(1, 20);
-
-  localtime_r(&t, &res);
-  if(t > status->time)
-  {
-	  MEM_CHECK_R_1(status->LastTime);
-	  snprintf(status->LastTime, 20, "%d-%d-%d %d:%d", res.tm_year - 100,
-			  res.tm_mon + 1, res.tm_mday, res.tm_hour,
-			  res.tm_min);
-	  status->time = t;
-	  // wire_belog must 1-4
-	  WireB = req->wire_belog + 1;
-	  ws = get_wire_status(WireB);
-	  if (ws) {
-		ws->Channel = req->wire_channel;
-		ws->SpanTime = req->wire_update_span;
-		ws->CycleTime = req->wire_cycle_time;
-		ws->EDCount = req->wire_ed_num;
-	  }
-  }
-  rwlock_unlock();
-
-  return send_0x6D(dev, req->EDID);
-}
-
-int process_0x6F(SerialDev *dev, void *data, size_t len) {
-  // Not to be supported.
-  UNUSED(dev);
-  UNUSED(data);
-  UNUSED(len);
-  return -EINVAL;
-}
-
-int check_0x6B(uint32_t EDID) {
-  return 0 == EDID;
-}
-
-int check_0x67(uint32_t EDID) {
-  EDTask *task = get_ed_task(EDID);
-  EDStatus *status = get_ed_status(EDID);
-  int ret = 0;
-
-  ASSERT(EDID != 0);
-  if (!task || !status) return 0;
-
-  logger_debug("%08X check PageMark[1-5] status:task [%d:%d %d:%d %d:%d %d:%d %d:%d]", EDID, \
-      status->PageMark, task->PageMark, status->Page1Mark, task->Page1Mark, \
-      status->Page2Mark, task->Page2Mark, status->Page3Mark, task->Page3Mark, \
-      status->Page4Mark, task->Page4Mark);
-  if ((task->PageMark && status->PageMark != task->PageMark) ||
-      (task->Page1Mark && status->Page1Mark != task->Page1Mark) ||
-      (task->Page2Mark && status->Page2Mark != task->Page2Mark) ||
-      (task->Page3Mark && status->Page3Mark != task->Page3Mark) ||
-      (task->Page4Mark && status->Page4Mark != task->Page4Mark))
-    ret = 1;
-
-  logger_info("Task check:%s", ret?"true":"false");
-  return ret;
-}
-
-int check_0x66(uint32_t EDID) {
-  EDTask *task = get_ed_task(EDID);
-  EDStatus *status = get_ed_status(EDID);
-  int ret = 0;
-
-  ASSERT(EDID != 0);
-  if (!task || !status) return 0;
-
-  // 常页 ！= 切页 或者 当前显示 ！= 切页，则发送切页任务
-  if (task->PageChange && status->CurPage != task->PageChange)
-    ret = 1;
-
-  logger_info("Task check:%s", ret?"true":"false");
-  return ret;
-}
-
-int check_0x65(uint32_t EDID) {
-  EDTask *task = get_ed_task(EDID);
-  EDStatus *status = get_ed_status(EDID);
-  int ret = 0;
-
-  ASSERT(EDID != 0);
-  if (!task || !status) return 0;
-
-  if (task->Black && !(task->Black == (uint8_t)status->Blacklist ||
-      task->Black == (uint8_t)(status->Blacklist >> 8) ||
-      task->Black == (uint8_t)(status->Blacklist >> 16) ||
-      task->Black == (uint8_t)(status->Blacklist >> 24)))
-    ret = 1;
-
-  logger_info("Task check:%s", ret?"true":"false");
-  return ret;
-}
-
-int check_0x64(uint32_t EDID) {
-  EDTask *task = get_ed_task(EDID);
-  EDStatus *status = get_ed_status(EDID);
-  int ret = 0;
-
-  ASSERT(EDID != 0);
-  if (!task || !status) return 0;
-
-  if (task->LedMark && status->LEDMark != task->LedMark)
-    ret = 1;
-
-  logger_info("Task check:%s", ret?"true":"false");
-  return ret;
-}
-
-int check_0x63(uint32_t EDID) {
-  EDTask *task = get_ed_task(EDID);
-  EDStatus *status = get_ed_status(EDID);
-  int ret = 0;
-
-  ASSERT(EDID != 0);
-  if (!task || !status) return 0;
-
-  if (task->NFCMark && status->NFCMark != task->NFCMark)
-    ret = 1;
-
-  logger_info("Task check:%s", ret?"true":"false");
-  return ret;
-}
-
-int check_0x6F(uint32_t EDID) {
-  // Not to be supported.
-  UNUSED(EDID);
-
-  return 0;
-}
-
-int send_0x6B(SerialDev *dev, uint32_t EDID) {
-  SerialHeader *header = (SerialHeader *)dev->proto_buf.data;
-  Response0x6B *response = (Response0x6B *)(header + 1);
-  CRC_TYPE *crc = (CRC_TYPE *)(response + 1);
-  System *system;
-
-  header->fun_code = 0x6B;
-  dev->proto_buf.len = sizeof(*header);
-
-  rwlock_rdlock();
-  system = get_system_conf();
-  response->store_mark = system->BlacklistMark;
-  response->ap_type = system->Type;
-  response->sotre_ap_count = system->Num;
-  response->reserved[0] = system->BACK1;
-  response->reserved[1] = system->BACK2;
-  response->reserved[2] = system->BACK3;
-  rwlock_unlock();
-  dev->proto_buf.len += sizeof(*response);
-
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  UNUSED(EDID);
-  return Send2Serial(dev);
-}
-
-int send_0x67(SerialDev *dev, uint32_t EDID) {
-  SerialHeader2 *header = (SerialHeader2 *)dev->proto_buf.data;
-  Response0x67 *response = (Response0x67 *)(header + 1);
-  size_t pic_len;
-  uint8_t cs = 0;
-  EDProperty *prop;
-  listNode *node;
-
-  ASSERT(EDID != 0);
-
-  header->fun_code = 0x67;
-  dev->proto_buf.len = sizeof(*header);
-
-  node = listSearchKey(dev->ed_list, &EDID);
-  if (!node)
-    prop = ed_new(dev, EDID);
-  else
-    prop = node->value;
-
-  if (!prop->pic_task.data) {
+  for (int i=0; i != frame->num; i ++) {
+    StatusReg *req = ((StatusReg *)frame->data) + i;
     rwlock_rdlock();
-    EDStatus *status = get_ed_status(EDID);
-    EDTask *task = get_ed_task(EDID);
-    struct Blob *blob = NULL;
+    taskstatus[0] = taskstatus[1] = taskstatus[2] = taskstatus[3] = taskstatus[4]  = 0;
+    EDTask *task = get_ed_task(req->EDID);
+    if(task)
+    {
+    	taskstatus[0] = task->PageMark;
+    	taskstatus[1] = task->Page1Mark;
+    	taskstatus[2] = task->Page2Mark;
+    	taskstatus[3] = task->Page3Mark;
+    	taskstatus[4] = task->Page4Mark;
+    }
+    rwlock_unlock();
+    logger_info("EDID:%#x %u  PageMark-Task: %d-%d , %d-%d , %d-%d , %d-%d , %d-%d  ED-TaskTimeMark:%d-%d-%d-%d", req->EDID,req->EDID, \
+    		req->page_mark,taskstatus[0],\
+			req->page1_mark,taskstatus[1],\
+			req->page2_mark,taskstatus[2],\
+			req->page3_mark,taskstatus[3],\
+			req->page4_mark,taskstatus[4],\
+			req->TaskTimeMark1,req->TaskTimeMark2,req->TaskTimeMark3,req->TaskTimeMark4);
 
-    logger_debug("no current task exist. Start new task.\n");
-    if(status == NULL || task == NULL) {
-      rwlock_unlock();
-      return -EINVAL;
+    ASSERT(req->EDID != 0);
+    if (!check_crc((uint8_t*)req, sizeof(StatusReg) - MEM_SIZE(StatusReg, crc))) {
+      continue;
+    }
+    rwlock_wrlock();
+    status = get_ed_status(req->EDID);
+    if (!status) {
+      logger_info("New edid %08x found on serial\n", req->EDID);
+      status = db_alloc_row("EDStatus");
+      if (!status) {
+        rwlock_unlock();
+        kill(getpid(), SIGUSR1);
+        logger_error("---------malloc failed--------");
+        return -1;
+      }
+      status->EDID = req->EDID;
+      db_cached_insert_row(db_handle, status);
     }
 
-    logger_debug("%08X check PageMark[1-5] status:task [%d:%d %d:%d %d:%d %d:%d %d:%d]", EDID, \
-        status->PageMark, task->PageMark, status->Page1Mark, task->Page1Mark, \
-        status->Page2Mark, task->Page2Mark, status->Page3Mark, task->Page3Mark, \
-        status->Page4Mark, task->Page4Mark);
-    // logger_debug("%08x status->PageMark:%#x task->PageMark:%#x", EDID, status->PageMark, task->PageMark);
-    if (task->PageMark && status->PageMark != task->PageMark)
-      blob = &task->PagePic;
-    else if (task->Page1Mark && status->Page1Mark != task->Page1Mark)
-      blob = &task->Page1Pic;
-    else if (task->Page2Mark && status->Page2Mark != task->Page2Mark)
-      blob = &task->Page2Pic;
-    else if (task->Page3Mark && status->Page3Mark != task->Page3Mark)
-      blob = &task->Page3Pic;
-    else if (task->Page4Mark && status->Page4Mark != task->Page4Mark)
-      blob = &task->Page4Pic;
-    else
-      blob = NULL;
+    status->CurPage = req->cur_page;
+    // logger_debug("status->PageMark:%#x req->PageMark:%#x", status->PageMark, req->page_mark);
+    status->PageMark = req->page_mark;
+    status->Page1Mark = req->page1_mark;
+    status->Page2Mark = req->page2_mark;
+    status->Page3Mark = req->page3_mark;
+    status->Page4Mark = req->page4_mark;
+    status->ScreenType = req->screen_type;
+    status->SignalQuality = req->signal_strength;
+    status->Voltage = req->voltage;
+    status->Temperature = req->tempur;
+    status->Factory = req->fact;
+    status->TimeoutCount = req->timeout;
+    status->LEDMark = req->led_mark;
+    status->NFCMark = req->nfc_mark;
+    status->Version = req->ver;
+    // status->Blacklist = req->store_id;
+    status->Belong = req->wire_belog;
+    *ap = req->wire_belog;
 
-    if (blob == NULL) {
-      rwlock_unlock();
-      listDelNode(dev->ed_list, node);
-      return -EINVAL;
+    if (!status->StartTime)
+      status->StartTime = calloc(1, 20);
+    MEM_CHECK_R_1(status->StartTime);
+    snprintf(status->StartTime, 20, "%d-%d-%d %d:%d", req->start_year,
+            req->start_month, req->start_day, req->start_hour,
+            req->start_min);
+    if (!status->EndTime)
+      status->EndTime = calloc(1, 20);
+    MEM_CHECK_R_1(status->EndTime);
+    snprintf(status->EndTime, 20, "%d-%d-%d %d:%d", req->end_year,
+            req->end_month, req->end_day, req->end_hour,
+            req->end_min);
+    status->GoodsMark = req->goods_mark;
+    status->DateType = req->time_mark;
+    status->Back1 = req->reserved[0];
+    status->Back2 = req->reserved[1];
+    status->Back3 = req->reserved[2];
+    status->Back4 = req->reserved[3];
+
+    status->TaskTimeMark1 = req->TaskTimeMark1;
+    status->TaskTimeMark2 = req->TaskTimeMark2;
+    status->TaskTimeMark3 = req->TaskTimeMark3;
+    status->TaskTimeMark4 = req->TaskTimeMark4;
+
+    if (!status->LastTime)
+      status->LastTime = calloc(1, 20);
+
+    localtime_r(&t, &res);
+    if(t > status->time)
+    {
+      MEM_CHECK_R_1(status->LastTime);
+      snprintf(status->LastTime, 20, "%d-%d-%d %d:%d", res.tm_year - 100,
+          res.tm_mon + 1, res.tm_mday, res.tm_hour,
+          res.tm_min);
+      status->time = t;
     }
-    prop->pic_task.len = blob->nLen;
-    logger_debug("Picture size:%d",blob->nLen);
-    prop->pic_task.data = malloc(prop->pic_task.len);
-
-    if (!prop->pic_task.data || !blob->data) {
-      rwlock_unlock();
-      listDelNode(dev->ed_list, node);
-      MEM_CHECK_R_1(NULL);
-      return -EINVAL;
-    }
-
-    memcpy(prop->pic_task.data, blob->data, prop->pic_task.len);
-    prop->pic_task.slice_num =
-            (uint16_t)ceil((float)prop->pic_task.len / PIC_SLICE_SIZE);
     rwlock_unlock();
-  } else
-    prop = node->value;
-
-  if (prop->pic_task.cur_slice == prop->pic_task.slice_num - 1) // last slice
-    pic_len = prop->pic_task.len - PIC_SLICE_SIZE * prop->pic_task.cur_slice;
-  else
-    pic_len = PIC_SLICE_SIZE;
-  dev->proto_buf.len += (sizeof(*response) + pic_len);
-
-  response->EDID = EDID;
-  response->pkt_num = prop->pic_task.slice_num;
-  response->pkt_idx = prop->pic_task.cur_slice;
-
-  logger_debug("EDID:%08X pkt_num:%d pkt_idx:%d", EDID, response->pkt_num,
-               response->pkt_idx);
-  memcpy(response->pic_slice,
-         prop->pic_task.data + PIC_SLICE_SIZE * prop->pic_task.cur_slice,
-         pic_len);
-
-  header->len = dev->proto_buf.len + 1;
-  for (unsigned int i = 0; i < dev->proto_buf.len; i ++)
-    cs ^= dev->proto_buf.data[i];
-  dev->proto_buf.data[dev->proto_buf.len++] = cs;
-
-  return Send2Serial(dev);
-}
-
-int send_0x66(SerialDev *dev, uint32_t EDID) {
-  SerialHeader2 *header = (SerialHeader2 *)dev->proto_buf.data;
-  uint16_t *ed_num = (uint16_t *)(header + 1);
-  Response0x66 *response = (Response0x66 *)(ed_num + 1);
-  CRC_TYPE *crc = (CRC_TYPE *)(response + 1);
-
-  ASSERT(EDID != 0);
-
-  header->fun_code = 0x66;
-  dev->proto_buf.len = sizeof(*header);
-
-  *ed_num = 0;
-  dev->proto_buf.len += sizeof(*ed_num);
-
-  rwlock_rdlock();
-  EDTask *task = get_ed_task(EDID);
-  if (!task) {
-    rwlock_unlock();
-    return -1;
   }
-  response->EDID = task->EDID;
-  response->page_mark = task->PageChange;
-  rwlock_unlock();
-  dev->proto_buf.len += sizeof(*response);
 
-  *ed_num = 1;
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  // logger_debug("EDID:%08X", EDID);
-  return Send2Serial(dev);
-}
-
-int send_0x65(SerialDev *dev, uint32_t EDID) {
-  SerialHeader2 *header = (SerialHeader2 *)dev->proto_buf.data;
-  uint16_t *ed_num = (uint16_t *)(header + 1);
-  Response0x65 *response = (Response0x65 *)(ed_num + 1);
-  CRC_TYPE *crc = (CRC_TYPE *)(response + 1);
-
-  ASSERT(EDID != 0);
-
-  header->fun_code = 0x65;
-  dev->proto_buf.len = sizeof(*header);
-
-  *ed_num = 0;
-  dev->proto_buf.len += sizeof(*ed_num);
-
-  rwlock_rdlock();
-  EDTask *task = get_ed_task(EDID);
-  if (!task) {
-    rwlock_unlock();
-    return -1;
-  }
-  response->EDID = task->EDID;
-  response->black_mark= task->Black;
-  rwlock_unlock();
-  dev->proto_buf.len += sizeof(*response);
-
-  *ed_num = 1;
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  // logger_debug("EDID:%08X", EDID);
-  return Send2Serial(dev);
-}
-
-int send_0x64(SerialDev *dev, uint32_t EDID) {
-  SerialHeader2 *header = (SerialHeader2 *)dev->proto_buf.data;
-  uint16_t *ed_num = (uint16_t *)(header + 1);
-  Response0x64 *response = (Response0x64 *)(ed_num + 1);
-  CRC_TYPE *crc = (CRC_TYPE *)(response + 1);
-
-  ASSERT(EDID != 0);
-
-  header->fun_code = 0x64;
-  dev->proto_buf.len = sizeof(*header);
-
-  *ed_num = 0;
-  dev->proto_buf.len += sizeof(*ed_num);
-
-  rwlock_rdlock();
-  EDTask *task = get_ed_task(EDID);
-  if (!task) {
-    rwlock_unlock();
-    return -1;
-  }
-  response->EDID = task->EDID;
-  response->LedMark = task->LedMark;
-  response->Led1Mark = task->Led1Mark;
-  response->Led2Mark = task->Led2Mark;
-  response->Led3Mark = task->Led3Mark;
-  response->Led4Mark = task->Led4Mark;
-  rwlock_unlock();
-  dev->proto_buf.len += sizeof(*response);
-
-  *ed_num = 1;
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  // logger_debug("EDID:%08X", EDID);
-  return Send2Serial(dev);
-}
-
-int send_0x63(SerialDev *dev, uint32_t EDID) {
-  SerialHeader2 *header = (SerialHeader2 *)dev->proto_buf.data;
-  uint16_t *ed_num = (uint16_t *)(header + 1);
-  Response0x63 *response = (Response0x63 *)(ed_num + 1);
-  CRC_TYPE *crc;
-
-  ASSERT(EDID != 0);
-
-  header->fun_code = 0x63;
-  dev->proto_buf.len = sizeof(*header);
-
-  *ed_num = 0;
-  dev->proto_buf.len += sizeof(*ed_num);
-
-  rwlock_rdlock();
-  EDTask *task = get_ed_task(EDID);
-  if (!task) {
-    rwlock_unlock();
-    return -1;
-  }
-  response->EDID = task->EDID;
-  response->nfc_mark = task->NFCMark;
-  strcpy(response->nfc_data, task->NFCData);
-  rwlock_unlock();
-  dev->proto_buf.len += sizeof(*response) + strlen(response->nfc_data);
-
-  *ed_num = 1;
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  crc = (CRC_TYPE *)(dev->proto_buf.data + dev->proto_buf.len);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  // logger_debug("EDID:%08X", EDID);
-  return Send2Serial(dev);
-}
-
-int send_0x6D(SerialDev *dev, uint32_t EDID) {
-  SerialHeader *header = (SerialHeader *)dev->proto_buf.data;
-  Response0x6D *response = (Response0x6D *)(header + 1);
-  CRC_TYPE *crc = (CRC_TYPE *)(response + 1);
-  System *system;
-  time_t t = time(NULL);
-  struct tm res;
-
-  ASSERT(EDID != 0);
-
-  header->fun_code = 0x6d;
-  dev->proto_buf.len = sizeof(*header);
-
-  localtime_r(&t, &res);
-  response->EDID = EDID;
-  response->year = res.tm_year - 100; // 0 - 255 {2000-2255}
-  response->month = res.tm_mon + 1;   // 1 - 12
-  response->day = res.tm_mday;
-  response->hour = res.tm_hour;
-  response->min = res.tm_min;
-  response->sec = res.tm_sec;        //dongjing add 2019-12-06
-
-  rwlock_rdlock();
-  system = get_system_conf();
-  response->global_par.store_mark = system->BlacklistMark;
-  response->global_par.ap_type = system->Type;
-  response->global_par.sotre_ap_count = system->Num;
-  response->global_par.reserved[0] = system->BACK1;
-  response->global_par.reserved[1] = system->BACK2;
-  response->global_par.reserved[2] = system->BACK3;
-  response->powersave = system->LowPower;
-  response->start_time = system->StartTime;
-  response->duration = system->Duration;
-  rwlock_unlock();
-  dev->proto_buf.len += sizeof(*response);
-
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  return Send2Serial(dev);
-}
-
-int send_0x62(SerialDev *dev) {
-  SerialHeader2 *header = (SerialHeader2 *)dev->proto_buf.data;
-  CRC_TYPE *crc = NULL;
-  int num;
-
-  //static uint8_t KeyOX62 = 0;
-  static uint8_t Kbuf[6] = {0};
-
-  //if(KeyOX62 == 0)
-  //{
-	  //KeyOX62++;
-	  System *system;
-	  system = get_system_conf();
-	  Kbuf[0] = (uint8_t)(system->BlacklistMark & 0xff);
-	  Kbuf[1] = (uint8_t)(system->Type & 0xff);
-	  Kbuf[2] = (uint8_t)(system->Num & 0xff);
-	  Kbuf[3] = (uint8_t)(system->BACK1 & 0xff);
-	  Kbuf[4] = (uint8_t)(system->BACK2 & 0xff);
-	  Kbuf[5] = (uint8_t)(system->BACK3 & 0xff);
-  //}
-
-
-  header->fun_code = 0x62;
-  dev->proto_buf.len = sizeof(*header);
-
-
-  uint16_t expected_num = dev->status_0x62.req_num;
-
-  rwlock_rdlock();
-  num = traverse_ed_status(&dev->status_0x62.last_0x62_edid, pack_0x62, dev);
-  rwlock_unlock();
-  logger_debug("Num of passed EDs:%d, tasks: %d, rest space: %d", num,
-               expected_num - dev->status_0x62.req_num,
-               dev->status_0x62.req_num);
-  if (dev->status_0x62.req_num) dev->status_0x62.last_0x62_edid = 0;
-
-  dev->proto_buf.data[dev->proto_buf.len++] = Kbuf[0];
-  dev->proto_buf.data[dev->proto_buf.len++] = Kbuf[1];
-  dev->proto_buf.data[dev->proto_buf.len++] = Kbuf[2];
-  dev->proto_buf.data[dev->proto_buf.len++] = Kbuf[3];
-  dev->proto_buf.data[dev->proto_buf.len++] = Kbuf[4];
-  dev->proto_buf.data[dev->proto_buf.len++] = Kbuf[5];
-
-  header->len = dev->proto_buf.len + sizeof(*crc);
-  crc = (CRC_TYPE *)(dev->proto_buf.data + dev->proto_buf.len);
-  *crc = MBCRC16(dev->proto_buf.data, dev->proto_buf.len);
-  dev->proto_buf.len += sizeof(*crc);
-
-  return Send2Serial(dev);
-}
-
-int send_0x6F(SerialDev *dev, uint32_t EDID) {
-  // Not to be supported.
-  UNUSED(dev);
-  UNUSED(EDID);
+  logger_info("############# Number of EDID Status: %d ############# ",(uint16_t)(frame->num));
 
   return 0;
 }
 
-int pack_0x62(void *opaque, void *data) {
-  SerialDev *dev = opaque;
-  EDStatus *status = data;
-  Response0x62 *response = (Response0x62 *)(dev->proto_buf.data +
-                                            dev->proto_buf.len);
-  EDTask *task = NULL;
-  struct Blob *blob = NULL;
 
-  ASSERT(status != NULL);
-
-
-  if (dev->status_0x62.wire_belong != (uint32_t)status->Belong) return 0;
-
-  // logger_debug("EDID:%08X", status->EDID);
-  dev->status_0x62.last_0x62_edid = status->EDID;
-
-  task = get_ed_task(status->EDID);
-
-  if (!task) {//任务删除
-    response->EDID = status->EDID;
-    response->pkt_num = 0;
-    response->funcode = 0x59;
-    // logger_debug("Funcode:%#x ,no task data.", response->funcode);
-    response ++;
-    dev->proto_buf.len += sizeof(*response);
-    // 如果有图片任务，删除链表中数据
-    listNode *node = listSearchKey(dev->ed_list, &status->EDID);
-    if (node) {
-      listDelNode(dev->ed_list, node);
-      logger_debug("delete Pic list success.");
+// 查询 cachelist 中有多少空闲buf
+static int get_idle_cache(struct CacheList *cache) {
+  uint8_t idle = 0;
+  for (int i = 0; i != cache->size; i ++) {
+    if (!cache->cache[i].idx) {
+      idle ++;
     }
-    // 任务已满，退出遍历
-    if (--dev->status_0x62.req_num == 0) return 1;
-    // 已经删除，不需要后续判断
-    return 0;
   }
 
-  //////////////0x67////////////////
-  if (task->PageMark && status->PageMark != task->PageMark)
-    blob = &task->PagePic;
-  else if (task->Page1Mark && status->Page1Mark != task->Page1Mark)
-    blob = &task->Page1Pic;
-  else if (task->Page2Mark && status->Page2Mark != task->Page2Mark)
-    blob = &task->Page2Pic;
-  else if (task->Page3Mark && status->Page3Mark != task->Page3Mark)
-    blob = &task->Page3Pic;
-  else if (task->Page4Mark && status->Page4Mark != task->Page4Mark)
-    blob = &task->Page4Pic;
-  else
-    blob = NULL;
+  return idle;
+}
 
-  if (blob) {
-    uint8_t slice_num = (uint8_t)ceil((float)blob->nLen / PIC_SLICE_SIZE);
-    response->EDID = status->EDID;
-    response->pkt_num = slice_num;
-    response->funcode = 0x67;
-    logger_debug("EDID: %08X Funcode:%#x Check task true.", status->EDID, response->funcode);
-    response ++;
-    dev->proto_buf.len += sizeof(*response);
 
-    logger_debug("PageMark[1-5] status:task [%02x:%02x %02x:%02x %02x:%02x %02x:%02x %02x:%02x]", \
-        status->PageMark, task->PageMark, status->Page1Mark, task->Page1Mark, \
-        status->Page2Mark, task->Page2Mark, status->Page3Mark, task->Page3Mark, \
-        status->Page4Mark, task->Page4Mark);
-    if (--dev->status_0x62.req_num == 0) return 1;
+// 将任务数据填充到合适的位置
+// 返回0 填充成功  返回1 填充失败
+static int fill_to_cache(struct CacheList *cache, void *data, size_t size) {
+  for (int i = 0; i != cache->size; i ++) {
+    // 最后两个crc字节
+    if (SPI_PAYLOAD - cache->cache[i].idx >= size) {
+      // 只有在 bigtask 时才正确
+      cache->cache[i].edid = *(uint32_t*)(((uint8_t*)data) + 3);
+      memcpy(cache->cache[i].frame.data + cache->cache[i].idx, data, size);
+      cache->cache[i].idx += size;
+      cache->cache[i].frame.num ++;
+      cache->task_num ++;
+      return 0;
+    }
   }
 
-  if (task->NFCMark && status->NFCMark != task->NFCMark) {
-    response->EDID = status->EDID;
-    response->pkt_num = 1;
-    response->funcode = 0x63;
-    logger_debug("EDID: %08X Funcode:%#x Check task true.", status->EDID, response->funcode);
-    response ++;
-    dev->proto_buf.len += sizeof(*response);
-    if (--dev->status_0x62.req_num == 0) return 1;
+  return 1;
+}
+
+// 将任务数据填充到合适的位置
+// 返回0 填充成功  返回1 填充失败
+static int fill_batch_task(struct CacheList *cache, uint32_t edid, uint8_t funcode, uint8_t mark, uint16_t pkts,int success,int hour,int min,int sec,int Day) {
+  BatchTask bt = {
+    .EDID = edid,
+    .funcode = funcode,
+    .mark = mark,
+    .pkts = pkts,
+	.Success = success,
+	.Hour = hour,
+	.Min  = min,
+	.Sec  = sec,
+	.Day  = Day
+  };
+
+  return fill_to_cache(cache, &bt, sizeof(bt));
+}
+
+static int get_tasks(void *opaque, void *data) {
+  struct CacheList *cache = opaque;
+  EDTask *task = data;
+  ASSERT(task != NULL);
+  EDStatus *status = get_ed_status(task->EDID);
+  EDStatus tmp_status;
+  uint8_t over = 0;
+
+  if (!status) {
+    status = &tmp_status;
+    memset(status, 0 , sizeof(EDStatus));
   }
 
-  if (task->LedMark && status->LEDMark != task->LedMark) {
-    response->EDID = status->EDID;
-    response->pkt_num = 1;
-    response->funcode = 0x64;
-    logger_debug("EDID: %08X Funcode:%#x Check task true.", status->EDID, response->funcode);
-    response ++;
-    dev->proto_buf.len += sizeof(*response);
-    if (--dev->status_0x62.req_num == 0) return 1;
-  }
+  //logger_info("------ fill batch task [%08X]-----------", task->EDID);
+  cache->last_edid = task->EDID;
 
-  if (task->Black && !(task->Black == (uint8_t)status->Blacklist ||
-    task->Black == (uint8_t)(status->Blacklist >> 8) ||
-    task->Black == (uint8_t)(status->Blacklist >> 16) ||\
-    task->Black == (uint8_t)(status->Blacklist >> 24))) {
-    response->EDID = status->EDID;
-    response->pkt_num = 1;
-    response->funcode = 0x65;
-    logger_debug("EDID: %08X Funcode:%#x Check task true.", status->EDID, response->funcode);
-    response ++;
-    dev->proto_buf.len += sizeof(*response);
-    if (--dev->status_0x62.req_num == 0) return 1;
-  }
+  //printf("Current Antenna NO: 0X%02X \n",(uint8_t)(cache->ap));
+
+  // 只处理本天线下价签的任务
+//  if (status->Belong != cache->ap)
+//  {
+//	  logger_info("status->Belong Wrong!!!!!!!!");
+//	  return 0;
+//  }
 
   if (task->PageChange && status->CurPage != task->PageChange) {
-    response->EDID = status->EDID;
-    response->pkt_num = 1;
-    response->funcode = 0x66;
-    logger_debug("EDID: %08X Funcode:%#x Check task true.", status->EDID, response->funcode);
-    response ++;
-    dev->proto_buf.len += sizeof(*response);
-    if (--dev->status_0x62.req_num == 0) return 1;
+    over += fill_batch_task(cache, task->EDID, 0x73, task->PageChange, 1,task->SuccessFlag,task->Hour,task->Min,task->Sec,task->Day);
+  }
+  if (task->LedMark && status->LEDMark != task->LedMark) {
+    over += fill_batch_task(cache, task->EDID, 0x71, task->LedMark, 1,task->SuccessFlag,task->Hour,task->Min,task->Sec,task->Day);
+  }
+  if (task->NFCMark && status->NFCMark != task->NFCMark) {
+    uint16_t pkt_size = MEM_SIZE(BigTask, data);;
+    uint8_t slice_num = (uint8_t)ceil((float)strlen(task->NFCData) / pkt_size);
+    over += fill_batch_task(cache, task->EDID, 0x72, task->NFCMark, slice_num,task->SuccessFlag,task->Hour,task->Min,task->Sec,task->Day);
   }
 
-  return 0;
+  uint8_t PicIdx = -1;
+  uint8_t PicMask = -1;
+  uint8_t X = 0;
+  struct Blob *blob = NULL;
+
+  if((status->TaskTimeMark1 != task->Day)  || \
+     (status->TaskTimeMark2 != task->Hour) || \
+	 (status->TaskTimeMark3 != task->Min)  || \
+	 (status->TaskTimeMark4 != task->Sec)){
+	   X = 1;
+  }
+
+
+  if (task->PageMark && (X > 0)) {
+    blob = &task->PagePic;
+    PicIdx = 1;
+    PicMask = task->PageMark;
+    //printf("PageMark = %d X = %d \n",task->PageMark,X);
+
+  } else if (task->Page1Mark && (X > 0)) {
+    blob = &task->Page1Pic;
+    PicIdx = 2;
+    PicMask = task->Page1Mark;
+    //printf("PageMark = %d X = %d \n",task->PageMark,X);
+
+  } else if (task->Page2Mark && (X > 0)) {
+    blob = &task->Page2Pic;
+    PicIdx = 3;
+    PicMask = task->Page2Mark;
+    //printf("PageMark = %d X = %d \n",task->PageMark,X);
+
+  } else if (task->Page3Mark && (X > 0)) {
+    blob = &task->Page3Pic;
+    PicIdx = 4;
+    PicMask = task->Page3Mark;
+    //printf("PageMark = %d X = %d \n",task->PageMark,X);
+
+  } else if (task->Page4Mark && (X > 0)) {
+    blob = &task->Page4Pic;
+    PicIdx = 5;
+    PicMask = task->Page4Mark;
+    //printf("PageMark = %d X = %d \n",task->PageMark,X);
+  } else {
+    blob = NULL;
+    //printf("PageTask none\n");
+  }
+  logger_debug("FILL Batch Task EDID [%08X %08u] ~~~~~ status:task [%d:%d -- %d:%d -- %d:%d -- %d:%d]", task->EDID, task->EDID, \
+    status->TaskTimeMark1, task->Day, status->TaskTimeMark2, task->Hour, \
+    status->TaskTimeMark3, task->Min, status->TaskTimeMark4, task->Sec);
+
+  if (blob) {
+    uint16_t pkt_size = MEM_SIZE(BigTask, data);;
+    uint8_t slice_num = (uint8_t)ceil((float)blob->nLen / pkt_size);
+    over += fill_batch_task(cache, task->EDID, PicIdx, PicMask, slice_num,task->SuccessFlag,task->Hour,task->Min,task->Sec,task->Day);
+  }
+
+  return over;
+}
+
+
+// 将任务数据填充到合适的位置
+// 返回0 填充成功  返回1 填充失败或大帧没有完全填充完
+static int fill_big_task( struct CacheList *cache,
+                          uint32_t edid,
+                          uint8_t funcode,
+                          void *data,
+                          size_t size,
+                          size_t total,
+                          size_t cur,
+						  uint8_t hour,
+						  uint8_t min,
+						  uint8_t sec,
+						  uint8_t Day) {
+  BigTask bt = {
+    .h.funcode = funcode,
+    .h.EDID = edid,
+    .h.total = total,
+	.h.Hour = hour,
+	.h.Min = min,
+	.h.Sec = sec,
+	.h.Day = Day
+  };
+
+  ASSERT(total > 0);
+  ASSERT(cur > 0);
+  ASSERT(size > 0);
+  ASSERT(data != NULL);
+
+  if (size <= MEM_SIZE(BigTask, data)) {
+    memcpy(bt.data, data, size);
+    bt.h.len = size;
+    bt.h.cur = cur;
+    bt.data[size] = cs_sum((uint8_t*)&bt.h, size + sizeof(BigHead));
+    bt.h.SmallXor = cs_sum((uint8_t*)&bt.h, sizeof(BigHead)-1);
+
+
+    return fill_to_cache(cache, &bt, sizeof(BigHead) + size + 1);
+  }
+
+  uint16_t pkt_size = MEM_SIZE(BigTask, data);
+  uint16_t slice_num = total - cur; // 此处 实际剩余  total - cur + 1个
+  int i = 0;
+
+  for (; i != slice_num; i ++) {                        // 剩余  total - cur
+    memcpy(bt.data, data + pkt_size * i, pkt_size);
+    bt.h.len = pkt_size;
+    bt.h.cur = cur + i;
+    bt.cs = cs_sum((uint8_t*)&bt.h, bt.h.len + sizeof(BigHead));
+    bt.h.SmallXor = cs_sum((uint8_t*)&bt.h, sizeof(BigHead)-1);
+
+    if (fill_to_cache(cache, &bt, sizeof(bt)))
+      goto out;
+  }
+
+  size_t remain = size - pkt_size * i;                  // 剩余  + 1
+  memcpy(bt.data, data + pkt_size * i, remain);
+  bt.h.len = remain;
+  bt.h.cur = cur + i;
+  bt.data[remain] = cs_sum((uint8_t*)&bt.h, bt.h.len + sizeof(BigHead));
+  bt.h.SmallXor = cs_sum((uint8_t*)&bt.h, sizeof(BigHead)-1);
+
+  if (fill_to_cache(cache, &bt, sizeof(BigHead) + remain + 1) == 0) {
+    return 0;
+  }
+
+out:
+  return 1;
+}
+
+static int get_tasks2(void *opaque, void *data) {
+  struct CacheList *cache = opaque;
+  EDTask *task = data;
+  ASSERT(task != NULL);
+  EDStatus *status = get_ed_status(task->EDID);
+  EDStatus tmp_status;
+  uint8_t over = 0;
+
+  if (!status) {
+    status = &tmp_status;
+    memset(status, 0 , sizeof(EDStatus));
+  }
+
+  logger_info("------ fill big task [%08X]-----------", task->EDID);
+
+  cache->last_edid = task->EDID;
+
+  // 只处理本天线下价签的任务
+  //if (status->Belong != cache->ap) return 0;
+
+  if (task->PageChange && status->CurPage != task->PageChange) {
+    over += fill_big_task(cache, task->EDID, 0x73, &task->PageChange, 1, 1, 1,task->Hour,task->Min,task->Sec,task->Day);
+  }
+  if (task->LedMark && status->LEDMark != task->LedMark) {
+    uint8_t tmpbuf[] = {
+                          task->LedMark,
+                          task->Led1Mark,
+                          task->Led2Mark,
+                          task->Led3Mark,
+                          task->Led4Mark,
+                        };
+
+    over += fill_big_task(cache, task->EDID, 0x71, tmpbuf, sizeof(tmpbuf), 1, 1,task->Hour,task->Min,task->Sec,task->Day);
+  }
+  if (task->NFCMark && status->NFCMark != task->NFCMark && task->NFCData) {
+    uint16_t pkt_size = MEM_SIZE(BigTask, data);;
+    uint8_t slice_num = (uint8_t)ceil((float)strlen(task->NFCData) / pkt_size);
+    over += fill_big_task(cache, task->EDID, 0x72, task->NFCData, strlen(task->NFCData), slice_num, 1,task->Hour,task->Min,task->Sec,task->Day);
+  }
+
+  uint8_t X = 0;
+  uint8_t PicIdx = -1;
+  struct Blob *blob = NULL;
+  listNode *node = listSearchKey(cache->ed_list, &task->EDID);
+  EDProperty *prop = NULL;
+  if (node) prop = node->value;
+
+  if((status->TaskTimeMark1 != task->Day)  || \
+     (status->TaskTimeMark2 != task->Hour) || \
+	 (status->TaskTimeMark3 != task->Min)  || \
+	 (status->TaskTimeMark4 != task->Sec)){
+	   X = 1;
+  }
+
+
+  if (task->PageMark && (X > 0)) {
+    blob = &task->PagePic;
+    PicIdx = 1;
+  } else if (task->Page1Mark && (X > 0)) {
+    blob = &task->Page1Pic;
+    PicIdx = 2;
+  } else if (task->Page2Mark && (X > 0)) {
+    blob = &task->Page2Pic;
+    PicIdx = 3;
+  } else if (task->Page3Mark && (X > 0)) {
+    blob = &task->Page3Pic;
+    PicIdx = 4;
+  } else if (task->Page4Mark && (X > 0)) {
+    blob = &task->Page4Pic;
+    PicIdx = 5;
+  } else {
+    /*****直接删除？需要释放内存么？******/
+    if (node) listDelNode(cache->ed_list, node);
+    blob = NULL;
+  }
+
+  if (blob) {
+    if (!cache->which.block && prop) {
+      cache->which.block = prop->block;
+      logger_info("--------------------------last block=%d-----------------------", prop->block);
+    }
+
+    uint16_t pkt_size = MEM_SIZE(BigTask, data);
+    uint8_t slice_num = (uint8_t)ceil((float)blob->nLen / pkt_size);
+
+    if (cache->which.block > slice_num) {
+      cache->which.block = 0; //错误的block忽略掉
+      logger_warning("EDID: %08X request %d block, but only %d block!", cache->which.EDID, \
+          cache->which.block, slice_num);
+    }
+
+    uint8_t idle = get_idle_cache(cache);
+
+    if (cache->which.block) cache->which.block --; // 块编号从 1 开始
+    int need = slice_num - cache->which.block;
+
+    if (!idle && need < 1) return 1;  // 最后一块可以能只有几个字节，可能能够填入拼组帧
+
+    over += fill_big_task(cache, task->EDID, PicIdx, \
+        blob->data + cache->which.block * pkt_size, \
+        blob->nLen - pkt_size * cache->which.block, \
+        slice_num,									\
+        (cache->which.block + 1),task->Hour,task->Min,task->Sec,task->Day);
+
+    if (over != 0 && !node) { // 填充了一部分
+      // over = 0 说明数据全部填充成功, != 0 说明填充了一部分
+      // idle > 0 说明至少填充了一部分
+      prop = ed_new(cache->ed_list, task->EDID);
+    }
+    if (prop) {
+      prop->block = cache->which.block + idle + 1;
+      if (prop->block >= slice_num) // 发送完成后，重新从头开始
+        prop->block = 1;
+    }
+  }
+
+  return over;
 }
 
 int ed_match(void *pic, void *edid) {
@@ -1189,28 +1115,18 @@ int ed_match(void *pic, void *edid) {
 
 void ed_free(void *ptr) {
   EDProperty *prop = ptr;
-  if (prop->pic_task.data)
-    free(prop->pic_task.data);
   free(prop);
 }
 
-struct EDProperty *ed_new(SerialDev *dev, uint32_t EDID) {
+struct EDProperty *ed_new(list *l, uint32_t EDID) {
   EDProperty *prop = calloc(1, sizeof(*prop));
   MEM_CHECK_RPTR(prop);
 
   prop->EDID = EDID;
-  listAddNodeTail(dev->ed_list, prop);
+  prop->block = 0;
+  listAddNodeTail(l, prop);
   logger_debug("calloc new EDProperty.");
 
   return prop;
 }
 
-int Send2Serial(SerialDev *dev) {
-  logger_hexbuf("SERIAL TX", dev->proto_buf.data, dev->proto_buf.len);
-  // gettimeofday(&end_time, NULL);
-  // long usec = end_time.tv_usec - start_time.tv_usec;
-  // long sec = end_time.tv_sec - start_time.tv_sec;
-	// logger_info("total time: %ld msec",1000 * sec + usec/ 1000);
-  return SerialSend(dev->fd.comfd, (const char *)dev->proto_buf.data,
-                    dev->proto_buf.len);
-}

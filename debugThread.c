@@ -17,7 +17,18 @@
 #include "netThread.h"
 #include "protocol.h"
 #include "up_packet.h"
+#include "down_packet.h"
 #include "debugThread.h"
+#include "websocket.h"
+#include "base64.h"
+
+// #undef logger_debug
+// #undef logger_info
+// #undef logger_error
+
+// #define logger_debug(format, ...)
+// #define logger_info(format, ...)
+// #define logger_error(format, ...)
 
 int setnonblocking(int sockfd)
 {
@@ -28,14 +39,37 @@ int setnonblocking(int sockfd)
     return 0;
 }
 
+int safeSend(int clientSocket, const uint8_t *buffer, size_t bufferSize)
+{
+    ssize_t written = send(clientSocket, buffer, bufferSize, 0);
+    if (written == -1) {
+        close(clientSocket);
+        perror("send failed");
+        return EXIT_FAILURE;
+    }
+    if (written != bufferSize) {
+        close(clientSocket);
+        perror("written not all bytes");
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
+
+int listener = -1;
+
+void terminal(void) {
+  if (listener > 0)
+    close(listener);
+}
+
 void *debugThread(void *arg)
 {
-  int myport = 20001;
-  int listener = -1;
+  int myport = 802;
 
   UNUSED(arg);
   pthread_detach(pthread_self());
-  pthread_setspecific (tls_key_threadnr, "debugThread");
+  pthread_setspecific (tls_key_threadnr, "webSocketThread");
 
   if( (listener = socket( AF_INET, SOCK_STREAM, 0)) == -1) {
     perror("socket");
@@ -45,13 +79,13 @@ void *debugThread(void *arg)
   int reuse = 1;
   setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-  struct sockaddr_in my_addr;
-  my_addr.sin_family = PF_INET;
-  my_addr.sin_port = htons(myport);
-  my_addr.sin_addr.s_addr = INADDR_ANY;
-  bzero( &(my_addr.sin_zero), 8);
+  struct sockaddr_in local;
+  local.sin_family = PF_INET;
+  local.sin_port = htons(myport);
+  local.sin_addr.s_addr = INADDR_ANY;
+  bzero( &(local.sin_zero), 8);
 
-  if ( bind( listener, (struct sockaddr*)&my_addr, sizeof(struct sockaddr)) == -1 ) {
+  if ( bind( listener, (struct sockaddr*)&local, sizeof(struct sockaddr)) == -1 ) {
     perror("bind");
     exit(1);
   }
@@ -69,105 +103,171 @@ void *debugThread(void *arg)
     exit(1);
   }
 
-  TcpContext TcpCtx = { 0, NULL};
-  // 由于不知道返回数据的长度,一次申请足够空间,最长的数据帧出现在A表查询
-  TcpCtx.up_packet = (UpPacket *)calloc(
-      1, sizeof(UpPacket) + MAX_TCP_SEND_PACKET);
-  if (!TcpCtx.up_packet) {
+  if (!init_global_buf(MAX_DEBUG_RECV_SIZE)) {
     perror("calloc");
     close(listener);
     kill(getpid(), SIGUSR1);
     return NULL;
   }
-  TcpCtx.up_packet->size = MAX_TCP_SEND_PACKET;
-  TcpCtx.up_packet->len = 0;
 
-  uint8_t *recbuf = calloc(1, MAX_DEBUG_RECV_SIZE);
+  char *recbuf = calloc(1, MAX_DEBUG_RECV_SIZE);
   if (!recbuf) {
     perror("calloc");
+    destory_temp_buf();
     close(listener);
     kill(getpid(), SIGUSR1);
     return NULL;
   }
 
+  logger_info("opened %s:%d", inet_ntoa(local.sin_addr), ntohs(local.sin_port));
   // struct timeval timeout = {6,0};
   // if (setsockopt(listener, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(struct timeval)) != 0)
   // {
   //   logger_error("set accept timeout failed");
   // }
 
-  print_log(LOG_INFO, 0, "run...");
+  logger_info("run...");
+  logger_info("listen on %d port!", myport);
   while(!restart) {
-    struct sockaddr_in sin;
+    logout(); // 默认 logout 状态
+
+    struct sockaddr_in remote;
     socklen_t socklen = sizeof(struct sockaddr_in);
     int client_fd = -1;
-    if( (client_fd = accept( listener, (struct sockaddr*)&sin, &socklen )) < 0 ) {
-        perror("accept");
-        continue;
+    if( (client_fd = accept( listener, (struct sockaddr*)&remote, &socklen )) < 0 ) {
+      restart = 1;
+      continue;
     }
 
     ev.events = EPOLLIN;
     ev.data.fd = client_fd;
     epoll_ctl( epollfd, EPOLL_CTL_ADD, client_fd, &ev);
 
-    logger_info("Receive a connection request.");
-    // 登录验证，防止恶意登录
-    char *login = "Just bing rich could cure unhappiness.";
-    memset(recbuf, 0, MAX_DEBUG_RECV_SIZE);
-    int len = RecvMsg(client_fd, epollfd, recbuf, MAX_DEBUG_RECV_SIZE);
-    if (len < 0 || (unsigned int)len != strlen(login) || strcmp(login, (char*)recbuf)) {
-      epoll_ctl(epollfd, EPOLL_CTL_DEL, client_fd, &ev);
-      close(client_fd);
-      logger_debug("Authentication failed.");
-      continue;
-    }
-
+    logger_info("connected %s:%d", inet_ntoa(remote.sin_addr), ntohs(remote.sin_port));
     logger_info("accept client...");
+
+
+    enum wsState state = WS_STATE_OPENING;
     int timeout_count = 0;
+    int len = 0;
+    size_t frameSize = MAX_DEBUG_RECV_SIZE;
+    uint8_t *data = NULL;
+    size_t dataSize = 0;
+    enum wsFrameType frameType = WS_INCOMPLETE_FRAME;
+    struct handshake hs;
+    nullHandshake(&hs);
+
+    #define prepareBuffer frameSize = MAX_DEBUG_RECV_SIZE; memset(recbuf, 0, MAX_DEBUG_RECV_SIZE);
+    #define initNewFrame frameType = WS_INCOMPLETE_FRAME; len = 0; memset(recbuf, 0, MAX_DEBUG_RECV_SIZE);
+
     do{
-      len = RecvMsg(client_fd, epollfd, recbuf, MAX_DEBUG_RECV_SIZE);
-      if (len > 0) logger_hexbuf("TCP RX", recbuf, len);
-      if (len > 5 && recbuf[0] == 0xfa && recbuf[1] == 0xfa &&
-          recbuf[len - 1] == 0xfb) {
-        struct timeval start_time, end_time;
-        gettimeofday(&start_time, NULL);
-        timeout_count = 0;
-
-        UpPacket *send_buf = analysis_tcp_data(recbuf + 2, len - 2, &TcpCtx);
-        if (send_buf) {
-          SendMsg(client_fd, send_buf->data, send_buf->len);
-          logger_hexbuf("TCP TX", send_buf->data, send_buf->len);
-        }
-        gettimeofday(&end_time, NULL);
-        long usec = end_time.tv_usec - start_time.tv_usec;
-        long sec = end_time.tv_sec - start_time.tv_sec;
-        logger_info("analysis_tcp_data time: %ld msec",1000 * sec + usec/ 1000);
-      } else if (0 > len) {
+      ssize_t readed = RecvMsg(client_fd, epollfd, recbuf + len, MAX_DEBUG_RECV_SIZE - len);
+      if (readed < 0) { // 链接中断
         break;
+      } else if (!readed) {
+        continue;
       }
+      len += readed;
+      assert(len <= MAX_DEBUG_RECV_SIZE);
+      logger_hexbuf("TCP RX", recbuf, len);
+      switch (state) {
+        case WS_STATE_OPENING:
+          frameType = wsParseHandshake(recbuf, len, &hs);
+          if (frameType == WS_OPENING_FRAME) {
+            initNewFrame;
+            if (strcmp(hs.resource, "/") != 0) {
+              frameSize = sprintf((char *)recbuf, "HTTP/1.1 404 Not Found\r\n\r\n");
+              safeSend(client_fd, recbuf, frameSize);
+              goto errout;
+            }
+            prepareBuffer;
+            wsGetHandshakeAnswer(&hs, recbuf, &frameSize);
+            freeHandshake(&hs);
+            if (safeSend(client_fd, recbuf, frameSize) == EXIT_FAILURE)
+              goto errout;
+            state = WS_STATE_NORMAL;
+            break;
+          }
 
-      sleep(1);
-      if (++ timeout_count > 400) {
-        break;
-      } //10分钟无操作则断开连接
+          if ((frameType == WS_INCOMPLETE_FRAME && len == MAX_DEBUG_RECV_SIZE)
+              || frameType == WS_ERROR_FRAME) {
+            if (frameType == WS_INCOMPLETE_FRAME)
+              logger_warning("Message length exceeds limit.");
+            else
+              logger_warning("Error in incoming frame");
+            prepareBuffer;
+            frameSize = sprintf((char *)recbuf,
+                                "HTTP/1.1 400 Bad Request\r\n"
+                                "%s%s\r\n\r\n",
+                                versionField,
+                                version);
+            safeSend(client_fd, recbuf, frameSize);
+            goto errout;
+          }
+          break;
+        case WS_STATE_NORMAL:
+        case WS_STATE_CLOSING:
+          frameType = wsParseInputFrame(recbuf, len, &data, &dataSize);
+          if ((frameType == WS_INCOMPLETE_FRAME && len == MAX_DEBUG_RECV_SIZE)
+              || frameType == WS_ERROR_FRAME) {
+            if (frameType == WS_INCOMPLETE_FRAME)
+                logger_warning("Message length exceeds limit.");
+            else
+              logger_warning("Error in incoming frame");
+            prepareBuffer;
+            wsMakeFrame(NULL, 0, recbuf, &frameSize, WS_CLOSING_FRAME);
+            if (safeSend(client_fd, recbuf, frameSize) == EXIT_FAILURE)
+              goto errout;
+            state = WS_STATE_CLOSING;
+            initNewFrame;
+          }
+          if (frameType == WS_CLOSING_FRAME) {
+            if (state == WS_STATE_CLOSING) {
+                goto errout;
+            } else {
+                prepareBuffer;
+                wsMakeFrame(NULL, 0, recbuf, &frameSize, WS_CLOSING_FRAME);
+                safeSend(client_fd, recbuf, frameSize);
+                goto errout;
+            }
+          } else if (frameType == WS_TEXT_FRAME) {
+            data[ dataSize ] = 0;
+            // 此时数据已经解密
+            logger_debug("recievedString:%s\n", data);
+            char *send_buf = analysis_json_packet(data);
+            prepareBuffer;
+            if (send_buf) {
+              wsMakeFrame(send_buf, strlen(send_buf), recbuf, &frameSize, WS_TEXT_FRAME);
+            } else {
+              char *errorstr = "[{\"status\":\"error\"}]";
+              wsMakeFrame(errorstr, strlen(errorstr), recbuf, &frameSize, WS_TEXT_FRAME);
+            }
+            // 此时数据已经加密
+            if (safeSend(client_fd, recbuf, frameSize) == EXIT_FAILURE)
+                goto errout;
+            initNewFrame;
+          }
+          break;
+        default:
+          state = 0;
+      }
     } while(!restart);
-
+errout:
     epoll_ctl(epollfd, EPOLL_CTL_DEL, client_fd, &ev);
     close(client_fd);
     logger_info("close client...");
   }
 
+  free_nosafe_outbuf();//base64 非安全调用
+  destory_temp_buf();
   free(recbuf);
-  free(TcpCtx.up_packet);
   logger_info("exit...");
-  close( listener );
+  close(listener);
   return 0;
 }
 
 void start_debug_task(void)
 {
   pthread_t pd;
-
-  // debugThread(NULL);
   pthread_create(&pd, NULL, debugThread, NULL);
 }

@@ -1,0 +1,74 @@
+diff --git a/serialThread.c b/serialThread.c
+index 9383d07..e4447a7 100644
+--- a/serialThread.c
++++ b/serialThread.c
+@@ -37,7 +37,7 @@ typedef struct SPI_REG_OPT {
+   uint32_t opt:8;
+ } __PACKED SPI_REG_OPT;
+ 
+-const SPI_REG_OPT SpiRegList[] = {
++const SPI_REG_OPT SpiRegListTemp[] = {
+   { .addr = 0xf81784, .opt = SPI_READ  }, // status
+   { .addr = 0x341884, .opt = SPI_WRITE }, // reg1
+   { .addr = 0x342884, .opt = SPI_WRITE }, // reg2
+@@ -331,10 +331,11 @@ static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
+   return 0;
+ }
+ 
+-static void fill_probe_frame(SpiFrame *frame) {
+-  frame->head.addr = SpiRegList[SPI_BASE].addr;
+-  frame->head.opt = SPI_READ;
+-}
++// static void fill_probe_frame(SpiFrame *frame) {
++#define fill_probe_frame(frame) do { \
++  frame->head.addr = SpiRegList[SPI_BASE].addr; \
++  frame->head.opt = SPI_READ; \
++} while(0)
+ 
+ #define SPI_REC_SEQUENCE_NOCRC(SEND, RECV) \
+     (RECV)->head.addr = 0x12345; \
+@@ -353,9 +354,33 @@ static void fill_probe_frame(SpiFrame *frame) {
+       continue; \
+     }
+ 
++int ReadSPIRegs(const char *dev_name, SPI_REG_OPT *SpiRegList, size_t size) {
++  char filename[64] = {0};
++  snprintf(filename, sizeof(filename), "./regs/%s", dev_name);
++  FILE *fp = fopen(filename, "r");
++  if (!fp) return -1;
++
++  char line[32];
++  uint8_t i = 0;
++
++  while(fgets(line, sizeof(line), fp) && i < size) {
++    if (strlen(line) < 3 || strlen(line) > 12) continue;
++    uint32_t v = 0;
++    sscanf(line, "%x", &v);
++    if (!v) continue;
++    SpiRegList[i++].addr = v;
++    logger_debug("SpiRegList[%d] = 0x%x", i - 1, v);
++  }
++
++  fclose(fp);
++
++  return i;
++}
++
+ void *ThreadSerial(void *arg) {
+   SerialDev *dev = arg;
+   char *thread_name = strrchr(dev->name, '/');
++  SPI_REG_OPT SpiRegList[SPI_TASK_END];
+ 
+   pthread_setspecific (tls_key_threadnr, thread_name + 1);
+   logger_info("run...");
+@@ -367,6 +392,10 @@ void *ThreadSerial(void *arg) {
+       sleep(3);
+     }
+   } while(!task_exit && dev->fd < 0);
++  if (ReadSPIRegs(thread_name + 1, &SpiRegList, SPI_TASK_END) < SPI_TASK_END) {
++    logger_error("Error reading configuration file!!!");
++    return NULL;
++  }
+ 
+   SpiProbeFrame *send_frame = calloc(1, sizeof(SpiProbeFrame));
+   SpiProbeFrame *recv_frame = calloc(1, SPI_LONG_FRAME_SIZE);

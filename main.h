@@ -10,12 +10,15 @@
 
 #include <sys/types.h>
 #include <signal.h>
+#include <assert.h>
 #include "automic.h"
+#include "wrap_memory.h"
 
 #include <time.h>
 #include "db.h"
 #include "log.h"
 #include "list.h"
+
 
 #define NET_DEV_NAME "eth0"
 
@@ -62,18 +65,23 @@ extern atomic_t task_update;
 
 #define clear_ed_status() db_cached_clear_table(db_handle, "EDStatus")
 #define clear_ed_task() db_cached_clear_table(db_handle, "EDTask")
+#define clear_white_list() db_cached_clear_table(db_handle, "WhiteList")
 #define get_ed_status(edid) db_cached_get_row(db_handle, "EDStatus", &edid)
 #define get_ed_task(edid) db_cached_get_row(db_handle, "EDTask", &edid)
+#define get_white_list(edid) db_cached_get_row(db_handle, "WhiteList", &edid)
 #define get_system_conf() db_cached_get_row(db_handle, "System", &sys_id)
-#define get_wire_status(wire) db_cached_get_row(db_handle, "WireStatus", &wire)
+#define get_extend_table(fun) db_cached_get_row(db_handle, "Extend", &fun)
 
 #define delete_ed_status(status) db_cached_delete_row(db_handle, status)
-#define delete_ed_task(edid) db_cached_delete_row(db_handle, task)
+#define delete_ed_task(task) db_cached_delete_row(db_handle, task)
+#define delete_white_list(wl) db_cached_delete_row(db_handle, wl)
 
 #define traverse_ed_status(start, cb, op) db_cached_traverse_row(db_handle, \
             "EDStatus", start, cb, op)
 #define traverse_ed_task(start, cb, op) db_cached_traverse_row(db_handle, \
             "EDTask", start, cb, op)
+#define traverse_white_list(start, cb, op) db_cached_traverse_row(db_handle, \
+            "WhiteList", start, cb, op)
 
 void rwlock_rdlock(void);
 void rwlock_wrlock(void);

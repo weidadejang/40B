@@ -29,6 +29,10 @@ typedef uintptr_t Handle_t;
 #define container_of(ptr, type, member) ((type *) \
             ((char *)ptr - offsetof(type, member) ))
 
+#define to_end_of(type, member) (sizeof(type) - offsetof(type, member) )
+
+#define MEM_SIZE(type, member) sizeof(((type*)0)->member)
+
 #define UNUSED(__x) (void)(__x)
 
 #define MAX_SERIAL_NUM (4)

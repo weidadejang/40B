@@ -3,6 +3,10 @@
 #ifndef  __MAC__
 #define __MAC__
 
+// 输入 www.baidu.com 类似格式
+int socket_resolver(const char *domain, char* ipaddr);
+int is_valid_ip(const char *ip);
+int is_valid_mac(const char *mac);
 int set_mac(unsigned char* mac, char *devname);
 
 int get_mac(unsigned char *mac, char *devname); //返回值是实际写入char * mac的字符个数（不包括'\0'）

@@ -14,6 +14,12 @@
 
 static const uint8_t base64_table[65] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static uint8_t *nosafe_outbuf = NULL;
+
+void free_nosafe_outbuf(void)
+{
+  nosafe_outbuf = realloc(nosafe_outbuf, 0);
+}
 
 /**
  * base64_encode - Base64 encode
@@ -28,7 +34,8 @@ static const uint8_t base64_table[65] =
  * not included in out_len.
  */
 uint8_t *base64_encode(const uint8_t *src, size_t len, size_t *out_len) {
-  uint8_t *out, *pos;
+  uint8_t *out = NULL;
+  uint8_t *pos = NULL;
   const uint8_t *end, *in;
   size_t olen;
   int line_len;
@@ -37,7 +44,8 @@ uint8_t *base64_encode(const uint8_t *src, size_t len, size_t *out_len) {
   olen += olen / 72;           /* line feeds */
   olen++;                      /* nul termination */
   if (olen < len) return NULL; /* integer overflow */
-  out = malloc(olen);
+  nosafe_outbuf = realloc(nosafe_outbuf, olen);
+  out = nosafe_outbuf;
   if (out == NULL) return NULL;
 
   end = src + len;

@@ -1,0 +1,11 @@
+--- serialThread.c
++++ serialThread.c
+@@ -37,7 +37,7 @@
+   uint32_t opt:8;
+ } __PACKED SPI_REG_OPT;
+ 
+-const SPI_REG_OPT SpiRegList[] = {
++const SPI_REG_OPT SpiRegListTemp[] = {
+   { .addr = 0xf81784, .opt = SPI_READ  }, // status
+   { .addr = 0x341884, .opt = SPI_WRITE }, // reg1
+   { .addr = 0x342884, .opt = SPI_WRITE }, // reg2

@@ -24,6 +24,8 @@
 #include "log.h"
 #include "main.h"
 #include "crc.h"
+#include "mac.h"
+#include "sysinfo.h"
 #include "netThread.h"
 #include "protocol.h"
 #include "up_packet.h"
@@ -31,7 +33,7 @@
 extern pthread_key_t tls_key_threadnr;
 
 static u8_t *recbuf = NULL;
-const u32_t recv_buff_size = 1024 * 1024;
+const u32_t recv_buff_size = 10 * 1024 * 1024;
 
 struct sock_param{
   int sockfd;
@@ -44,6 +46,7 @@ static TcpContext TcpCtx = {
         };
 
 static int net_cmd_do(const char *ip, const int port, TcpContext *TcpCtx);
+static int net_cmd_do_old(const char *ip, const int port, TcpContext *TcpCtx);
 
 int RecvMsg(int _fd, int epollfd, unsigned char *buf, int size) {
   int nfds, read_count;
@@ -52,14 +55,12 @@ int RecvMsg(int _fd, int epollfd, unsigned char *buf, int size) {
 
   memset(events, 0, sizeof(events));
   while (rec_len < size) {
-    nfds = epoll_wait(epollfd, events, 1, 500);
+    nfds = epoll_wait(epollfd, events, 1, 100);
     if (0 < nfds) {
       read_count = recv(_fd, buf + rec_len, size - rec_len, 0);
-      if (read_count < 0 && errno == EINTR)
-        continue;
-      else if (read_count == 0)
+      if (read_count < 0 && errno == EINTR) {
         break;
-      else if (read_count < 0)
+      }else if (read_count <= 0)
         return -1;
       rec_len += read_count;
     } else {  //超时返回0
@@ -93,7 +94,6 @@ void *heart_thread(void *arg) {
   unsigned char ip_flag = 0;
   char ip[32] = {0};
   int port;
-  struct hostent *h;
   System *systemconf = get_system_conf();
 
   UNUSED(arg);
@@ -114,37 +114,20 @@ void *heart_thread(void *arg) {
   pthread_setspecific (tls_key_threadnr, "heartThread");
   logger_info("run...");
   while (!restart) {
-    sleep(3);
-    if (cnt++ > systemconf->BACK2) {
-    //if (cnt++ > 0) {
+    sleep(4);
+    if (cnt++ > systemconf->Heart) {
       memset(ip, 0, sizeof(ip));
       rwlock_rdlock();
       if (!ip_flag) {
-        strncpy(ip, systemconf->DestIP1, sizeof(ip));
+        socket_resolver(systemconf->DestIP1, ip);
         port = systemconf->DestPort1;
       } else {
-        //strncpy(ip, systemconf->DestIP2, sizeof(ip));
-        //port = systemconf->DestPort2;
-      //}
-
-		  h = gethostbyname((char *)systemconf->DestURL);
-		  if(h!=NULL)
-		  {
-			  logger_warning( "Domain-->Get Host Name : = %s\n", h->h_name);
-			  logger_warning( "Domain-->IP address: %s",inet_ntoa(*((struct in_addr *)h->h_addr)));
-			  strncpy(ip, inet_ntoa(*((struct in_addr *)h->h_addr)), sizeof(ip));
-			  port = systemconf->DestPort2;
-		  }
-		  else
-		  {
-		        strncpy(ip, systemconf->DestIP1, sizeof(ip));
-		        port = systemconf->DestPort1;
-		  }
+        socket_resolver(systemconf->DestIP2, ip);
+        port = systemconf->DestPort2;
       }
-
-
       rwlock_unlock();
       status = net_cmd_do(ip, port, &TcpCtx);
+      //status = net_cmd_do_old(ip, port, &TcpCtx);
       cnt = 0;
 
       if (status < 0) {
@@ -157,10 +140,6 @@ void *heart_thread(void *arg) {
         err_cnt = 0;
       }
     }
-    /* TEST sigaction */
-    // printf("------send usr sigaction--------\n");
-    // kill(getpid(), SIGUSR1);
-    // sleep(100);
   }
   free(recbuf);
   free(TcpCtx.up_packet);
@@ -223,47 +202,16 @@ int create_socket(struct sock_param *g, const char *ip, int port) {
   return g->sockfd;
 }
 
-
-void DateTimeSetting(int year,int month,int day,int hour,int min,int sec)
-{
-    struct tm tptr;
-    struct timeval tv;
-
-    tptr.tm_year = year+100;
-    tptr.tm_mon = month - 1;
-    tptr.tm_mday = day;
-    tptr.tm_hour = hour;
-    tptr.tm_min = min;
-    tptr.tm_sec = sec;
-
-    tv.tv_sec = mktime(&tptr);
-    tv.tv_usec = 0;
-    settimeofday(&tv, NULL);
+void GetNowTime(int idx) {
+  char buf[32];
+  logger_info("[%d]-->Current time:%s", idx, sys_time_string(buf, sizeof(buf)));
 }
 
-void GetNowTime(int i)
-{
-	time_t time_seconds = time(0);
-	struct tm now_time;
-	localtime_r(&time_seconds, &now_time);
-
-	logger_info("Step %d send:-------------->Set Current Datetime:%d-%d-%d %d:%d:%d",i, now_time.tm_year-100, now_time.tm_mon + 1,
-    now_time.tm_mday, now_time.tm_hour, now_time.tm_min, now_time.tm_sec);
-
-}
-
-
-int net_cmd_do(const char *ip, const int port, TcpContext *TcpCtx) {
-  int socket_fd = -1;
-  struct sock_param gp;
+int send_heart_packet(int socket_fd) {
   System *sysconf = get_system_conf();
-
-  socket_fd = create_socket(&gp, ip, port);
-  if (socket_fd < 0) {
-    return -1;
-  }
-
   int v1, v2, v3, v4, v5, v6;
+  time_t t = time(NULL);
+  struct tm res;
 
   v1 = v2 = v3 = v4 = v5 = v6 = 0;
   rwlock_rdlock();
@@ -271,45 +219,97 @@ int net_cmd_do(const char *ip, const int port, TcpContext *TcpCtx) {
     sscanf(sysconf->MAC, "%02x:%02x:%02x:%02x:%02x:%02x", &v1, &v2, &v3, &v4, &v5, &v6);
   rwlock_unlock();
   logger_info("mac:%s",sysconf->MAC);
-  time_t t = time(NULL);
-  struct tm res;
+
+  //logger_info("this DB Url:%s",(char *)sysconf->DestURL);
+
   localtime_r(&t, &res);
-  u8_t heart_packet[] = {0xfa, 0xfa, 0x50, 0x0b, 0x00, v1, v2, v3, v4, v5, v6, res.tm_year - 100, res.tm_mon + 1, res.tm_mday, res.tm_hour, res.tm_min, 0x8c, 0xdc, 0xfb, 0xfb};
+  u8_t heart_packet[] = {0xfa, 0xfa, 0x80, 0x0c, 0x00, v1, v2, v3, v4, v5, v6, res.tm_year - 100, res.tm_mon + 1, res.tm_mday, res.tm_hour, res.tm_min, (uint8_t)(sysconf->StationVer),0x8c, 0xdc, 0xfb, 0xfb};
+//u8_t heart_packet[] = {0xfa, 0xfa, 0x50, 0x0b, 0x00, v1, v2, v3, v4, v5, v6, res.tm_year - 100, res.tm_mon + 1, res.tm_mday, res.tm_hour, res.tm_min, 0x8c, 0xdc, 0xfb, 0xfb};
   u16_t crc = MBCRC16(heart_packet + 2, sizeof(heart_packet) - 6);
-  heart_packet[16] = (u8_t) crc;
-  heart_packet[17] = (u8_t) (crc >> 8);
+  heart_packet[17] = (u8_t) crc;
+  heart_packet[18] = (u8_t) (crc >> 8);
 
   logger_info("send heart packet.");
+
   //GetNowTime(1);
   if( SendMsg( socket_fd, heart_packet, sizeof(heart_packet)) < 0 ) {
     logger_error("send heart failed!");
+    return -1;
+  }
+  else{
+	  //Get_SysTime();
+	  //logger_hexbuf("TCP TX", heart_packet, sizeof(heart_packet));
+  }
+  return 0;
+}
+
+
+
+
+
+int net_cmd_do(const char *ip, const int port, TcpContext *TcpCtx) {
+  int socket_fd = -1;
+  struct sock_param gp;
+
+  socket_fd = create_socket(&gp, ip, port);
+  if (socket_fd < 0) {
+    return -1;
+  }
+
+  if (send_heart_packet(socket_fd) < 0) {
     goto out;
   }
   sleep(2);//服务器可能反应比较慢，延时5s等待
+  
+  int len = 0;
 
-  int len = RecvMsg(socket_fd, gp.epollfd, recbuf, recv_buff_size);
-  if (len > 0) logger_hexbuf("TCP RX", recbuf, len);
-  /*2020-05-24 -----------------------------------> Change AP Date*/
-  if ((len > 5) && recbuf[0] == 0xfc && recbuf[1] == 0xfc && recbuf[8] == 0xfd && recbuf[9] == 0xfd)
-  {
-	  /*2n 3y 4r 5s 6f 7m*/
-	  DateTimeSetting(recbuf[2],recbuf[3],recbuf[4],recbuf[5],recbuf[6],recbuf[7]);
-	  //GetNowTime(2);
-  }
-  if (len > 5 && recbuf[0] == 0xfa && recbuf[1] == 0xfa &&
-      recbuf[len - 1] == 0xfb)
-  {
-		//GetNowTime(3);
-		UpPacket *send_buf = analysis_tcp_data(recbuf + 2, len - 2, TcpCtx);
-		if (send_buf) {
-		SendMsg(socket_fd, send_buf->data, send_buf->len);
+  while(1) {
 
-		//GetNowTime(4);
-		logger_hexbuf("TCP TX", send_buf->data, send_buf->len);
+    int ret = RecvMsg(socket_fd, gp.epollfd, recbuf + len, recv_buff_size - len);
+
+    if (ret <= 0) {
+  	  //Get_SysTime();
+      logger_info("The connection was abnormally interrupted.");
+      break;
+    }
+    len += ret;
+
+    ASSERT(len <= recv_buff_size);
+    logger_hexbuf("TCP RX", recbuf, len);
+
+    OnePacket *onepkt = (OnePacket*)recbuf;
+    if (onepkt->head != 0xfafa) {
+      len = 0;
+      continue;
+    }
+    int tmpLen = onepkt->L.sLen;
+    if (onepkt->fun_code == TASK_PIC_CODE) { //局部图,长度4个字节
+      tmpLen = onepkt->L.lLen;
+    }
+    int total_size = sizeof(OnePacket) + tmpLen + sizeof(uint16_t);
+    /*
+     *              0xfafa funcode len(2B) [..len data..] CRC(2B) 0xfbfb
+     *              0xfafa funcode len(4B) [..len data..]         0xfbfb
+     * */
+    if (total_size == len && recbuf[total_size - 1] == 0xfb && recbuf[total_size - 2] == 0xfb) {
+      UpPacket *send_buf = analysis_tcp_data(recbuf + 2, len - 2, TcpCtx);
+      if (send_buf) {
+        SendMsg(socket_fd, send_buf->data, send_buf->len);
+        logger_hexbuf("TCP TX", send_buf->data, send_buf->len);
+      }
+      len = 0;
+      // 短连接模式下发送完数据可以退出了, 长连接模式时注释下文
+      break;
+    }
+    if ((recv_buff_size - len) == 0) {
+      logger_info("Data exceeds the maximum length limit of receive cache!!!");
+      len = 0;
+      break;
     }
   }
 
 out:
+
   logger_info("close socket");
   close(gp.sockfd);
   close(gp.epollfd);

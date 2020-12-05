@@ -17,8 +17,144 @@
 #include <net/if.h>        //for struct ifreq
 #include <net/if_arp.h>
 #include <ifaddrs.h>
-#include <netinet/in.h> 
+#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+
+// 输入 www.baidu.com 类似格式
+int socket_resolver(const char *domain, char* ipaddr)
+{
+    if (!domain || !ipaddr) return -1;
+
+    char *http = "http";
+    char *hn = (char*)domain;
+    if (!strncmp(domain, http, strlen(http))) {
+      hn = hn + strlen(http) + strlen("://");
+      while (*hn == '/') hn ++;
+    }
+
+    struct hostent* host=gethostbyname(hn);
+    if (!host) return -1;
+
+    // 获取第一个IP地址
+    strncpy(ipaddr, inet_ntoa(*(struct in_addr*)host->h_addr_list[0]), 16);
+
+    return 0;
+}
+
+
+int is_valid_ip(const char *ip)
+{
+    if (ip == NULL || strlen(ip) < 7) {
+        return -1;
+    }
+
+    int len = strlen(ip);
+    const char *start = ip;
+    const char *end = ip + len - 1;
+    int ret = 0;
+    int dot_count = 0;
+    int cur_val = 0;
+    int val = -1;
+
+    while (end > start && isspace(*end)) {
+        --end;
+    }
+
+    while (start < end && isspace(*start)) {
+        ++start;
+    }
+
+    if (start >= end || isdigit(*start) == 0 || isdigit(*end) == 0) {
+        return -1;
+    }
+
+    while (start <= end) {
+        while (start <= end && '0' <= *start && *start <= '9') {
+            cur_val = 10 * cur_val + (*start - '0');
+            if (cur_val < 0 || cur_val > 255) {
+                ret = -1;
+                break;
+            }
+            val = cur_val;
+            ++start;
+        }
+        if (start <= end) {
+            if (*start == '.' && val != -1) {
+                ++start;
+                ++dot_count;
+                cur_val = 0;
+                val = -1;
+            } else {
+                ret = -1;
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if (ret == 0 && dot_count != 3) {
+        ret = -1;
+    }
+
+    return ret;
+}
+
+int is_valid_mac(const char *mac)
+{
+    if (mac == NULL || strlen(mac) < 17) {
+        return -1;
+    }
+
+    int len = strlen(mac);
+    int ret = 0;
+    int num_count = 0;
+    int colon_count = 0;
+    const char *start = mac;
+    const char *end = mac + len - 1;
+
+    while (end > start && isspace(*end)) {
+        --end;
+    }
+
+    while (start < end && isspace(*start)) {
+        ++start;
+    }
+
+    if ((end - start) != 16 || isxdigit(*start) == 0 || isxdigit(*end) == 0) {
+        return -1;
+    }
+
+    while (start <= end) {
+        while (start <= end && isxdigit(*start)) {
+            ++start;
+            if (++num_count > 2) {
+                ret = -1;
+                break;
+            }
+        }
+
+        if (start <= end ) {
+            if (*start == ':' && num_count == 2) {
+                ++colon_count;
+                num_count = 0;
+                ++start;
+            } else {
+                ret = -1;
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if (ret == 0 && colon_count != 5) {
+        ret = -1;
+    }
+
+    return ret;
+}
 
 int set_mac(unsigned char* mac, char *devname)
 {
@@ -283,7 +419,21 @@ int set_gateway(const char *szGateWay)
 
     return ret;
 }
-
+#if 0
+int main(int argc, char **argv)
+{
+  if (argc != 2) {
+    printf("%s hostname\n",argv[0]);
+    return 1;
+  }
+  char buf[100];
+  int ret = socket_resolver(argv[1], buf);
+  if (!ret)
+    printf("ipaddr:%s\n",buf);
+  else
+    printf("ipaddr: error\n");
+}
+#endif
 #if 0
 int main()
 {

@@ -7,6 +7,22 @@ typedef unsigned short u16_t;
 typedef unsigned int u32_t;
 typedef void *OBJECT;
 
+#define QUERY_SYS_CODE        0x70
+#define TASK_LED_CODE         0x71
+#define TASK_NFC_CODE         0x72
+#define TASK_CHANGEPAGE_CODE  0x73
+#define TASK_PIC_CODE         0x74
+#define QUERY_TASK_CODE       0x75
+#define DELETE_TASK_CODE      0x76
+#define SET_WHITE_LIST_CODE   0x77
+#define QUERY_STATUS_CODE     0x78
+#define DELETE_STATUS_CODE    0x79
+#define SYNC_TIME_CODE        0x7a
+#define SET_SYS_CODE          0x7b
+
+
+
+
 #define MAX_NUM_OF_JQ 800
 // 一个价签60多个字节  一个任务6个字节
 #define MAX_NUM_OF_TASK 800 * 10
@@ -37,6 +53,11 @@ typedef struct Cmd0x51 {
   uint16_t end_addr;
   uint8_t data[0];
 } __attribute__((packed, aligned(1))) Cmd0x51;
+
+typedef struct Response0x51 {
+  uint8_t status;
+} __attribute__((packed, aligned(1))) Response0x51;
+
 
 typedef struct Cmd0x52 {
   uint16_t num;
@@ -71,7 +92,6 @@ typedef struct LEDData {
   uint8_t  Led2Mark;
   uint8_t  Led3Mark;
   uint8_t  Led4Mark;
-  uint8_t  Led5Mark;
 } __attribute__((packed, aligned(1))) LEDData;
 
 typedef struct Cmd0x54 {
@@ -206,6 +226,19 @@ typedef struct ResponseHead {
   uint8_t  data[0];
 } __attribute__((packed, aligned(1))) ResponseHead;
 
+typedef struct Cmd0x7A {
+  uint8_t year;
+  uint8_t month;
+  uint8_t day;
+  uint8_t hour;
+  uint8_t minutes;
+  uint8_t seconds;
+} __attribute__((packed, aligned(1))) Cmd0x7A;
+
+
+#define Response0x7A Cmd0x7A
+
+
 
 typedef struct DownPacket {
   u32_t EDID;
@@ -230,5 +263,16 @@ typedef struct WriePacket {
   u32_t EDID;
   u32_t other;
 } __attribute__((packed, aligned(1))) WriePacket;
+
+typedef struct OnePacket {
+  uint16_t head;
+  uint8_t fun_code;
+  union {
+    uint16_t sLen;
+    uint32_t lLen;
+  } L;
+} __attribute__((packed, aligned(1))) OnePacket;
+
+
 
 #endif

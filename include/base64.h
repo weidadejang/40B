@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 
+void free_nosafe_outbuf(void);
 /**
  * base64_encode - Base64 encode
  * @src: Data to be encoded
@@ -23,6 +24,7 @@
  * nul terminated to make it easier to use as a C string. The nul terminator is
  * not included in out_len.
  */
+/* 次函数现在不是线程安全的函数，要求一次只能有一个调用 */
 uint8_t *base64_encode(const uint8_t *src, size_t len, size_t *out_len);
 /**
  * base64_decode - Base64 decode

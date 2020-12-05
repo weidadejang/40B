@@ -1,0 +1,81 @@
+diff --git a/serialThread.c b/serialThread.c
+index a541955..7e20db9 100644
+--- a/serialThread.c
++++ b/serialThread.c
+@@ -4,6 +4,7 @@
+ #include "crc.h"
+ #include "main.h"
+ #include "sysinfo.h"
++#include "gpioThread.h"
+ #ifdef USE_SERIAL
+ #include "serial.h"
+ #else
+@@ -338,6 +339,23 @@ static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
+   return 0;
+ }
+ 
++void spidev_reset(const char *dev) {
++  const char *spidev[][2] = {
++    {"spidev1.0", OUT1_0},
++    {"spidev2.0", OUT2_3},
++    {"spidev3.0", OUT3_0},
++    {"spidev4.0", OUT4_0}
++  };
++
++  for (int i = 0; i < 4; i++) {
++    if (!strcmp(spidev[i][0], dev)) {
++      gpio_set_value(spidev[i][1], 0);
++      sleep(1);
++      gpio_set_value(spidev[i][1], 1);
++      break;
++    }
++  }
++}
+ // static void fill_probe_frame(SpiFrame *frame) {
+ #define fill_probe_frame(frame) do { \
+   frame->head.addr = SpiRegList[SPI_BASE].addr; \
+@@ -357,6 +375,7 @@ static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
+     (RECV)->head.addr = 0x12345; \
+     spi_transfer(dev->fd, (uint8_t*)(SEND), (uint8_t*)(RECV), sizeof(*(SEND))); \
+     if (!check_crc(((uint8_t*)(RECV)) + sizeof(SPI_REG_OPT), sizeof(*(RECV)) - sizeof(SPI_REG_OPT) - sizeof(CRC_TYPE) )) { \
++      spidev_reset(thread_name); \
+       msleep(1000); \
+       continue; \
+     }
+@@ -853,10 +872,10 @@ static int fill_big_task( struct CacheList *cache,
+   }
+ 
+   uint16_t pkt_size = MEM_SIZE(BigTask, data);
+-  uint16_t slice_num = total - cur;
++  uint16_t slice_num = total - cur; // 此处 实际剩余  total - cur + 1个
+   int i = 0;
+ 
+-  for (; i != slice_num; i ++) {
++  for (; i != slice_num; i ++) {                        // 剩余  total - cur
+     memcpy(bt.data, data + pkt_size * i, pkt_size);
+     bt.h.len = pkt_size;
+     bt.h.cur = cur + i;
+@@ -866,7 +885,7 @@ static int fill_big_task( struct CacheList *cache,
+       goto out;
+   }
+ 
+-  size_t remain = size - pkt_size * i;
++  size_t remain = size - pkt_size * i;                  // 剩余  + 1
+   memcpy(bt.data, data + pkt_size * i, remain);
+   bt.h.len = remain;
+   bt.h.cur = cur + i;
+@@ -963,11 +982,12 @@ static int get_tasks2(void *opaque, void *data) {
+     }
+ 
+     uint8_t idle = get_idle_cache(cache);
++
++    if (cache->which.block) cache->which.block --; // 块编号从 1 开始
+     int need = slice_num - cache->which.block;
+ 
+-    if (!idle && need < 1) return 1;
++    if (!idle && need < 1) return 1;  // 最后一块可以能只有几个字节，可能能够填入拼组帧
+ 
+-    if (cache->which.block) cache->which.block --; // 块编号从 1 开始
+     over += fill_big_task(cache, task->EDID, PicIdx, \
+         blob->data + cache->which.block * pkt_size, \
+         blob->nLen - pkt_size * cache->which.block, \
