@@ -70,9 +70,9 @@ static void prepare(const char *dbname) {
     SystemConf->BACK3 = 0xac;
     SystemConf->StationVer = 0x4b;
     SystemConf->SubPicSize = 4096;
-    SystemConf->Type = 0x05;
-    SystemConf->Mark = 0x06;
-    SystemConf->Num  = 10;
+    //SystemConf->Type = 0x05;
+    //SystemConf->Mark = 0x06;
+    //SystemConf->Num  = 10;
 
     SystemConf->MAC = realloc(SystemConf->MAC, 18);
     unsigned char mac[6];
@@ -103,18 +103,15 @@ int main(int argc, const char **argv)
 {
   time_t last_update = time(NULL);
   const char *dev[] = { "/dev/spidev0.0" ,"/dev/spidev2.0","/dev/spidev3.0","/dev/spidev1.0" }; // 先用一个进行测试
-  //const char *dev[] = { "/dev/spidev1.0" ,"/dev/spidev0.0" };
-  //const char *dev[] = { "/dev/spidev0.0"};
+  //const char *dev[] = {"/dev/spidev0.0"};
+  //const char *dev[] = {"/dev/spidev0.0","/dev/spidev1.0"};
 
   if (argc < 2) {
     printf("Usage: %s dbfile [daemon]\n", argv[0]);
     exit(0);
   }
 
-  //printf("sizeof unsigned    = %d\n", sizeof(unsigned));
-  //printf("sizeof unsigned int= %d\n", sizeof(unsigned int));
-
-  if (argc == 3) {
+  if (argc > 2) {
     printf("goto daemon...\n");
     daemon(0,0);
   }

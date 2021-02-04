@@ -41,10 +41,13 @@ const unsigned char TM16_SevenSegmentTbl[10][2] = {	//idx  S1 S2 S3 S4 S5 XX XX 
 
 #define GPIOn_IOx(n, x)  ((n-1)*32 + x)
 
-#define LED_DATA GPIOn_IOx(5, 17)
-#define LED_CLK  GPIOn_IOx(5, 16)
-#define LED_STB  GPIOn_IOx(5, 15)
+//#define LED_DATA GPIOn_IOx(5, 17)
+//#define LED_CLK  GPIOn_IOx(5, 16)
+//#define LED_STB  GPIOn_IOx(5, 15)
 
+#define LED_DATA GPIOn_IOx(4, 26)
+#define LED_CLK  GPIOn_IOx(4, 27)
+#define LED_STB  GPIOn_IOx(4, 29)
 
 
 #define  TM16_STB_Low()    gpio_set_value(LED_STB, 0)

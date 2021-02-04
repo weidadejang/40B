@@ -21,7 +21,7 @@
 
 
 //#define MAX_EXPIRED_TIME  (24*60*60) //24 Hour
-#define MAX_EXPIRED_TIME  (192*60*60) //24 Hour
+#define MAX_EXPIRED_TIME  (168*60*60) //24 Hour
 #define MAX_SCAN_NUM      256
 struct ExpiredStatus{
   uint32_t edid[MAX_SCAN_NUM];

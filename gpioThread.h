@@ -28,9 +28,9 @@
 
 #define GPIOn_IOx(n, x)  ((n-1)*32 + x)
 
-#define LED_DATA GPIOn_IOx(5, 17)
-#define LED_CLK  GPIOn_IOx(5, 16)
-#define LED_STB  GPIOn_IOx(5, 15)
+#define LED_DATA GPIOn_IOx(4, 26)
+#define LED_CLK  GPIOn_IOx(4, 27)
+#define LED_STB  GPIOn_IOx(4, 29)
 
 #define IN1 GPIOn_IOx(5, 17)
 #define IN2 GPIOn_IOx(5, 16)
@@ -57,14 +57,14 @@
 #define setbit(x,y)  (x) |= (1 << (y))
 #define clrbit(x,y)  (x) &= ~(1 << (y))
 
-#define  TM16_STB_Low()    gpio_set_value(LED_STB, 1)
-#define  TM16_STB_High()   gpio_set_value(LED_STB, 0)
+#define  TM16_STB_Low()    gpio_set_value(LED_STB, 0)
+#define  TM16_STB_High()   gpio_set_value(LED_STB, 1)
 
-#define  TM16_DIO_Low()    gpio_set_value(LED_DATA, 1)
-#define  TM16_DIO_High()   gpio_set_value(LED_DATA, 0)
+#define  TM16_DIO_Low()    gpio_set_value(LED_DATA, 0)
+#define  TM16_DIO_High()   gpio_set_value(LED_DATA, 1)
 
-#define  TM16_CLK_Low()    gpio_set_value(LED_CLK, 1)
-#define  TM16_CLK_High()   gpio_set_value(LED_CLK, 0)
+#define  TM16_CLK_Low()    gpio_set_value(LED_CLK, 0)
+#define  TM16_CLK_High()   gpio_set_value(LED_CLK, 1)
 
 
 int gpio_set_value(int pin, char value);

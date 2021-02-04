@@ -38,7 +38,7 @@ void print_log(int level, int errno_flag, const char *fmt, ...)
 #endif
     }
     if (level >= 0)
-        syslog(level, "%s", buf);
+       syslog(level, "%s", buf);
 
     strcat(buf, "\n");
     fputs(buf, stderr);

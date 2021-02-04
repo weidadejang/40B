@@ -247,6 +247,20 @@ void print_buf(char *fmt, uint8_t *buf, int size)
 	//printf("\n--------------------------------------------------------------------------------\n");
 }
 
+void printf_SPITX(char *fmt, uint8_t *buf, int size)
+{
+	int i=0;
+	printf("TX:[%d]\n",size);
+	for(; i<size; i++) printf(fmt,buf[i]);
+	printf("\n");
+}
+void printf_SPIRX(char *fmt, uint8_t *buf, int size)
+{
+	int i=0;
+	printf("RX:[%d]\n",size);
+	for(; i<size; i++) printf(fmt,buf[i]);
+	printf("\n");
+}
 
 int start_serial_tasks(int ndev, const char *devs[]) {
   int idx, ret;
@@ -287,7 +301,7 @@ static int check_crc(uint8_t *data, size_t len) {
 
   if (crc1 != crc2) {
     logger_debug("Expected crc = %hx, but got %hx.", crc1, crc2);
-    print_buf("%02X ",data, len);
+    //print_buf("%02X ",data, len);
     return 0;
   }
 
@@ -347,7 +361,8 @@ static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
 	struct spi_ioc_transfer tr;
 
 	memset(&tr, 0, sizeof(tr));
-	logger_hexbuf("SPI TX", tx, len);
+
+	//logger_hexbuf("SPI TX", tx, len);
 
 	tr.tx_buf = (unsigned long)(tx);
 	tr.rx_buf = (unsigned long)(rx);
@@ -356,7 +371,7 @@ static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
 	return -1;
 	}
 
-	logger_hexbuf("SPI RX", (const char*)rx, len);
+	//logger_hexbuf("SPI RX", (const char*)rx, len);
 
   return 0;
 }
@@ -375,17 +390,17 @@ void spidev_reset(const char *dev)
     if (!strcmp(spidev[i][0], dev))
     {
     	if(Errtimes[i] < 500) Errtimes[i]++;
-    	printf("\nCurrent Err Occur at: %s   err time : %d  \n",dev,Errtimes[i]);
+    	//printf("  Current Err Occur at: %s   err time : %d  ",dev,Errtimes[i]);
 
     	if(Errtimes[i] >= 20){
     		printf("Reset SPI DEVICE: %s   \n",dev);
 
     		Errtimes[i] = 0;
-            //gpio_set_value(spidev[i][1], 0);
-            //sleep(1);
-            //gpio_set_value(spidev[i][1], 1);
+            gpio_set_value(spidev[i][1], 0);
+            sleep(1);
+            gpio_set_value(spidev[i][1], 1);
     	}
-    	printf("--------------------------------------------------------------------------------\n");
+    	//printf("--------------------------------------------------------------------------------\n");
 
       break;
     }
@@ -418,7 +433,8 @@ void spidev_reset(const char *dev)
 
 int ReadSPIRegs(const char *dev_name, SPI_REG_OPT *SpiRegList, size_t size) {
   char filename[64] = {0};
-  snprintf(filename, sizeof(filename), "./regs/%s", dev_name);
+  //snprintf(filename, sizeof(filename), "./regs/%s", dev_name);
+  snprintf(filename, sizeof(filename), "/root/regs/%s", dev_name);
   FILE *fp = fopen(filename, "r");
   if (!fp) return -1;
 
@@ -443,6 +459,11 @@ void *ThreadSerial(void *arg) {
   SerialDev *dev = arg;
   char *thread_name = strrchr(dev->name, '/');
   SPI_REG_OPT SpiRegList[SPI_TASK_END];
+  struct timeval tv;
+  //uint64_t OldTime = 0,TmpTime = 0;
+  static uint16_t Combo = 0;
+  static uint32_t Cnttime = 0;
+  static uint32_t Cnttime2 = 0;
 
   pthread_setspecific (tls_key_threadnr, thread_name + 1);
   logger_info("run...");
@@ -501,6 +522,15 @@ void *ThreadSerial(void *arg) {
         (probe->key == 7 && probe->reg == 0)) {
       // key = 1 说明价签状态准备好了
       // 读取寄存器块中的价签数据
+
+		gettimeofday(&tv, NULL);
+		logger_info("STEP <--------------------Current loop : %d---------------------------->",Cnttime++);
+		logger_info("STEP 1 :start"); // 秒
+		logger_info("STEP second: %ld", tv.tv_sec); // 秒
+		logger_info("STEP millisecond: %ld", tv.tv_sec * 1000 + tv.tv_usec / 1000); // 毫秒
+		//logger_info("STEP <----------------------------------------------------------------->");
+
+
       for (int i = 0; i < probe->reg; i ++) {
         cachelist.cache[i].frame.head = SpiRegList[SPI_TASK_BEGIN + i];
         cachelist.cache[i].frame.head.opt = SPI_READ;
@@ -513,18 +543,44 @@ void *ThreadSerial(void *arg) {
         process_status(recv_task_frame, &cachelist.ap);
         //usleep(500000);
       }
-      if(probe->key == 1){
+      //if(probe->key == 1){
       	//sleep(1);
-      	usleep(100000);
-      }
+      	//usleep(100000);
+      //}
 
-	  // key = 7 说明射频芯片支持linux自由发送
-	  resp_probe->total = fill_task_mark(&cachelist);
-	  resp_probe->key = 0x02; // 批量任务
+      	/*
+		gettimeofday(&tv, NULL);
+		logger_info("STEP <----------------------------------------------------------------->");
+		logger_info("STEP 2 :fill_task_mark(&cachelist)  before"); // 秒
+		logger_info("STEP second: %ld", tv.tv_sec); // 秒
+		logger_info("STEP millisecond: %ld", tv.tv_sec * 1000 + tv.tv_usec / 1000); // 毫秒
+		logger_info("STEP <----------------------------------------------------------------->");
+		*/
+
+		// key = 7 说明射频芯片支持linux自由发送
+		resp_probe->total = fill_task_mark(&cachelist);
+		resp_probe->key = 0x02; // 批量任务
+
+		/*
+		gettimeofday(&tv, NULL);
+		logger_info("STEP <----------------------------------------------------------------->");
+		logger_info("STEP 3 :fill_task_mark(&cachelist)  after "); // 秒
+		logger_info("STEP second: %ld", tv.tv_sec); // 秒
+		logger_info("STEP millisecond: %ld", tv.tv_sec * 1000 + tv.tv_usec / 1000); // 毫秒
+		logger_info("STEP <----------------------------------------------------------------->");
+		*/
 
     }
 	else if (probe->key == 3) { // key = 3 说明射频芯片请求任务，edid > 0 单个价签任务
       // 射频请求某个edid的任务
+
+	  	gettimeofday(&tv, NULL);
+		logger_info("STEP <-----------------------PicChannel %d----------------------------->",Cnttime2++);
+		logger_info("STEP 3"); // 秒
+		logger_info("STEP second: %ld", tv.tv_sec); // 秒
+		logger_info("STEP millisecond: %ld", tv.tv_sec * 1000 + tv.tv_usec / 1000); // 毫秒
+		//logger_info("STEP <----------------------------------------------------------------->");
+
       cachelist.which = probe->which;
       resp_probe->total = fill_task(&cachelist);
       resp_probe->key = 0x04;
@@ -534,11 +590,15 @@ void *ThreadSerial(void *arg) {
     } else {
       // 运行到此处说明 linux 发送的数据 射频芯片还未读取完
       usleep(100000);
-      //sleep(5);
+      //sleep(1);
       //logger_info("run...3");
       continue;
     }
+
+
     int i = 0;
+
+
     for (; i < cachelist.size && i < SPI_TASK_END; i ++) {
       if (!cachelist.cache[i].idx) break;
       cachelist.cache[i].frame.head = SpiRegList[SPI_TASK_BEGIN + i];
@@ -546,18 +606,35 @@ void *ThreadSerial(void *arg) {
       // SPI Frame: Addr + R/W + DATA + CRC
       // CRC = MBCRC16( DATA )
       //cachelist.cache[i].frame.crc = MBCRC16((uint8_t*)&cachelist.cache[i].frame.num, offsetof(SpiFrame, crc) - offsetof(SpiFrame, num));
-      cachelist.cache[i].frame.crc = MBCRC16((uint8_t*)&cachelist.cache[i].frame.key, offsetof(SpiFrame, crc) - offsetof(SpiFrame, key));
-      spi_transfer(dev->fd, (uint8_t*)&cachelist.cache[i].frame, (uint8_t*)recv_frame, SPI_LONG_FRAME_SIZE);
-      //logger_info("run...44");
+        cachelist.cache[i].frame.crc = MBCRC16((uint8_t*)&cachelist.cache[i].frame.key, offsetof(SpiFrame, crc) - offsetof(SpiFrame, key));
+        spi_transfer(dev->fd, (uint8_t*)&cachelist.cache[i].frame, (uint8_t*)recv_frame, SPI_LONG_FRAME_SIZE);
 
     }
+
+    /*
+	gettimeofday(&tv, NULL);
+	logger_info("STEP <----------------------------------------------------------------->");
+	logger_info("STEP 4"); // 秒
+	logger_info("STEP second: %ld", tv.tv_sec); // 秒
+	logger_info("STEP millisecond: %ld", tv.tv_sec * 1000 + tv.tv_usec / 1000); // 毫秒
+	logger_info("STEP <----------------------------------------------------------------->");
+	*/
+
     resp_probe->reg = i; // 有效数据占用
     send_frame->head = SpiRegList[SPI_BASE];
     send_frame->head.opt = SPI_WRITE;
     send_frame->crc = MBCRC16((uint8_t*)&send_frame->rp, sizeof(ResponseProbe));
     spi_transfer(dev->fd, (uint8_t*)send_frame, (uint8_t*)recv_frame, sizeof(*send_frame));
-    usleep(100000);
-    //sleep(5);
+
+	gettimeofday(&tv, NULL);
+	logger_info("STEP <----------------------------------------------------------------->");
+	logger_info("STEP 5"); // 秒
+	logger_info("STEP second: %ld", tv.tv_sec); // 秒
+	logger_info("STEP millisecond: %ld", tv.tv_sec * 1000 + tv.tv_usec / 1000); // 毫秒
+	//logger_info("STEP <----------------------------------------------------------------->");
+
+	usleep(100000);
+    //sleep(1);
     //
     // --- 发送完spi最后一帧后，执行任务情况统计  否则  sleep
     //
@@ -726,14 +803,16 @@ static int process_status(SpiFrame *frame, uint8_t *ap) {
     status->Belong = req->wire_belog;
     *ap = req->wire_belog;
 
-    if (!status->StartTime)
-      status->StartTime = calloc(1, 20);
+    //if (!status->StartTime)
+      //status->StartTime = calloc(1, 20);
+    status->StartTime = realloc(status->StartTime, 20);
     MEM_CHECK_R_1(status->StartTime);
     snprintf(status->StartTime, 20, "%d-%d-%d %d:%d", req->start_year,
             req->start_month, req->start_day, req->start_hour,
             req->start_min);
-    if (!status->EndTime)
-      status->EndTime = calloc(1, 20);
+    //if (!status->EndTime)
+    //status->EndTime = calloc(1, 20);
+    status->EndTime = realloc(status->EndTime, 20);
     MEM_CHECK_R_1(status->EndTime);
     snprintf(status->EndTime, 20, "%d-%d-%d %d:%d", req->end_year,
             req->end_month, req->end_day, req->end_hour,
@@ -750,8 +829,9 @@ static int process_status(SpiFrame *frame, uint8_t *ap) {
     status->TaskTimeMark3 = req->TaskTimeMark3;
     status->TaskTimeMark4 = req->TaskTimeMark4;
 
-    if (!status->LastTime)
-      status->LastTime = calloc(1, 20);
+    //if (!status->LastTime)
+    //status->LastTime = calloc(1, 20);
+    status->LastTime = realloc(status->LastTime, 20);
 
     localtime_r(&t, &res);
     if(t > status->time)

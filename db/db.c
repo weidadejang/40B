@@ -285,7 +285,7 @@ int db_cached_traverse_row(Handle_t handle, const char *table_name,
   // 遍历到list尾部时，键值自动清零，保证自动从头开始
   if (!node && prim_val) *((uint32_t*)prim_val) = 0;
 
-  printf("GOT Number of Task %d \n",count);
+  //printf("==========================================================>Get Number of Task %d \n",count);
 
   return count;
 }

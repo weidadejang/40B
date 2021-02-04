@@ -96,38 +96,41 @@ void TM16_SendOneByte(unsigned char tx_dat)
   unsigned char i;
   for (i = 0; i < 8; i++) {
     TM16_CLK_Low();
-    SLEEP(0, 100000);
+
+    usleep(10000);
     if (tx_dat & 0x01)
       TM16_DIO_High();
     else
       TM16_DIO_Low();
-    SLEEP(0, 100000);
+    usleep(1000);
     TM16_CLK_High();
-    SLEEP(0, 100000);
+    usleep(10000);
     tx_dat >>= 1;
   }
 }
+
+
 
 void TM16_SendCommand(unsigned char tx_cmd)
 {
   unsigned char i;
   TM16_STB_Low();
-  SLEEP(0, 100000);
+  usleep(10000);
   for (i = 0; i < 8; i++) {
     TM16_CLK_Low();
-    SLEEP(0, 100000);
+    usleep(10000);
     if (tx_cmd & 0x01)
       TM16_DIO_High();
     else
       TM16_DIO_Low();
-    SLEEP(0, 100000);
+    usleep(10000);
     TM16_CLK_High();
-    SLEEP(0, 100000);
+    usleep(1000);
     tx_cmd >>= 1;
   }
-  SLEEP(0, 100000);
+  usleep(10000);
   TM16_STB_High();
-  //SLEEP(0, 100000);
+  usleep(10000);
 }
 
 
@@ -139,54 +142,55 @@ void TM16_UpdateOneDigit(unsigned char position, unsigned char value)
   TM16_SendOneByte((position << 1) + 0xC0);	//setup display address
   TM16_SendOneByte(TM16_SevenSegmentTbl[value][0]);
   TM16_STB_High();
-  SLEEP(0, 10000);
+  usleep(1000);
   TM16_STB_Low();
   TM16_SendOneByte((position << 1) + 0xC1);	//setup display address
   TM16_SendOneByte(TM16_SevenSegmentTbl[value][1]);
   TM16_STB_High();
-  SLEEP(0, 10000);
+  usleep(1000);
 }
+
 
 void Signal_2led(void)
 {
   TM16_SendCommand(0x00);	//setup display mode(4X8)
   TM16_SendCommand(0x44);	//setup data mode (¹Ì¶¨µØÖ·)
+
   TM16_STB_Low();
+  usleep(1000);
   TM16_SendOneByte(0xC4);	//setup display address
   TM16_SendOneByte(0xff);
+  usleep(1000);
   TM16_STB_High();
 
   //SLEEP(0, 10000);
-  usleep(100000);
+  usleep(1000);
 
   TM16_STB_Low();
+  usleep(1000);
   TM16_SendOneByte(0xC5);	//setup display address
   TM16_SendOneByte(0xff);
+  usleep(1000);
   TM16_STB_High();
   //SLEEP(0, 10000);
-  usleep(100000);
+  usleep(1000);
   TM16_SendCommand(0x88);	//display control command(11/16)
 }
+
 
 void led_autocheck(void)
 {
   int i = 0;
 
-  for (i = 0; i < 4; i++) {
+  for (i = 1; i < 9; i++) {
     TM16_SendCommand(0x00);	//setup display mode(4X8)
-    //sleep(1);
     TM16_UpdateOneDigit(0x00, i);
-    //sleep(1);
     TM16_SendCommand(0x88);	//display control command(11/16)
-
-    //sleep(1);
+    //usleep(1);
     TM16_SendCommand(0x00);	//setup display mode(4X8)
-    //sleep(1);
     TM16_UpdateOneDigit(0x01, i);
-    //sleep(1);
     TM16_SendCommand(0x88);	//display control command(11/16)
-
-    sleep(1);
+    //sleep(1);
   }
   // TODO: 此处应该关闭led显示
 }
@@ -211,7 +215,7 @@ uint8_t get_reset_key(void) {
 
 void reset_spidev(void)
 {
-  logger_info("-----spidev reset------");
+  logger_info("-----spidev reset------\n");
   gpio_set_value(U2_RESET, 1);
   gpio_set_value(U14_RESET, 1);
   gpio_set_value(U21_RESET, 1);
@@ -226,7 +230,7 @@ void reset_spidev(void)
   gpio_set_value(U14_RESET, 1);
   gpio_set_value(U21_RESET, 1);
   gpio_set_value(U25_RESET, 1);
-  usleep(500000);
+  //usleep(500000);
 }
 
 
@@ -234,8 +238,11 @@ void reset_spidev(void)
 void *gpioThread(void *arg)
 {
   uint8_t type = 0;
+  uint8_t chushu = 0;
+  uint8_t yushu = 0;
   uint8_t reset = 0;
   int reset_timeout = 0;
+  //int xTIME = 2;
 
   UNUSED(arg);
   pthread_detach(pthread_self());
@@ -243,31 +250,64 @@ void *gpioThread(void *arg)
 
   //reset_spidev();
   logger_info("Running led self-checking program.");
-//  while(1)
-//  {
-	  Signal_2led();
-	  led_autocheck();
-	  //TM16_STB_Low();
-	  //TM16_DIO_Low();
-	  //TM16_CLK_Low();
-	  //TM16_STB_High();
-	  //TM16_DIO_High();
-	  //TM16_CLK_High();
-//	  sleep(1);
-//	  printf("this is ok\n");
-//  }
 
-  logger_info("running...");
+  //while(1){
+  //	  reset_spidev();
+  //}
+
+  Signal_2led();
 
   System *sysconf = get_system_conf();
   sysconf->Type &= 0x000000ff;
 
+  type = get_key_value();
+  type = get_key_value();
+
+  if (type != sysconf->Type)
+  {
+	rwlock_wrlock();
+	sysconf->Type = type;
+	db_update_row(db_handle, sysconf);
+	rwlock_unlock();
+  }
+
+  for(int j = 0 ; j < 3 ; j ++)
+  {
+		chushu = (uint8_t)(type / 10) % 10;
+		yushu  = (uint8_t)(type % 10);
+		TM16_UpdateOneDigit(0x00, chushu & 0x0f);
+		TM16_UpdateOneDigit(0x01, yushu & 0x0f);
+		sleep(1);
+  }
+
+  /*
+  while(xTIME > 0)
+  {
+	  type = get_key_value();
+	  chushu = (uint8_t)(type / 10) % 10;
+	  yushu  = (uint8_t)(type % 10);
+      TM16_UpdateOneDigit(0x00, chushu & 0x0f);
+      TM16_UpdateOneDigit(0x01, yushu & 0x0f);
+      xTIME--;
+      sleep(2);
+  }*/
+
+  reset_spidev();
+  sleep(5);
+  gpio_set_value(U2_RESET, 1);
+  gpio_set_value(U14_RESET, 1);
+  gpio_set_value(U21_RESET, 1);
+  gpio_set_value(U25_RESET, 1);
+
+  logger_info("GPIO running...");
+
   while (!restart) {
     type = get_key_value();
     reset = get_reset_key();
+
     printf("type = %x reset = %x \n", type, reset);
 
-    if (reset) reset_timeout ++;
+    if (reset == 0) reset_timeout ++;
     else reset_timeout = 0;
 
     if (reset_timeout > 10) {
@@ -276,8 +316,14 @@ void *gpioThread(void *arg)
     }
 
     if (type != sysconf->Type) {
-      TM16_UpdateOneDigit(0x00, type & 0x0f);
-      TM16_UpdateOneDigit(0x01, type >> 8);
+      for(int j = 0 ; j < 3 ; j ++)
+      {
+    	  chushu = (uint8_t)(type / 10) % 10;
+    	  yushu  = (uint8_t)(type % 10);
+          TM16_UpdateOneDigit(0x00, chushu & 0x0f);
+          TM16_UpdateOneDigit(0x01, yushu & 0x0f);
+    	  sleep(1);
+      }
       rwlock_wrlock();
       sysconf->Type = type;
       db_update_row(db_handle, sysconf);
