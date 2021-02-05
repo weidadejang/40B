@@ -286,6 +286,7 @@ int db_cached_traverse_row(Handle_t handle, const char *table_name,
   if (!node && prim_val) *((uint32_t*)prim_val) = 0;
 
   //printf("==========================================================>Get Number of Task %d \n",count);
+  //logger_info("==============Count Task Number: %d ==============", count);
 
   return count;
 }

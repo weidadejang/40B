@@ -359,21 +359,16 @@ static uint8_t cs_sum(uint8_t *data, ssize_t size) {
 static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
 {
 	struct spi_ioc_transfer tr;
-
 	memset(&tr, 0, sizeof(tr));
-
 	//logger_hexbuf("SPI TX", tx, len);
-
 	tr.tx_buf = (unsigned long)(tx);
 	tr.rx_buf = (unsigned long)(rx);
 	tr.len = len;
 	if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 0) { // 射频芯片不回复时返回什么？
 	return -1;
 	}
-
 	//logger_hexbuf("SPI RX", (const char*)rx, len);
-
-  return 0;
+	return 0;
 }
 
 void spidev_reset(const char *dev)
@@ -590,7 +585,7 @@ void *ThreadSerial(void *arg) {
     } else {
       // 运行到此处说明 linux 发送的数据 射频芯片还未读取完
       usleep(100000);
-      //sleep(1);
+      //sleep(2);
       //logger_info("run...3");
       continue;
     }
@@ -1080,7 +1075,7 @@ static int get_tasks2(void *opaque, void *data) {
     memset(status, 0 , sizeof(EDStatus));
   }
 
-  logger_info("------ fill big task [%08X]-----------", task->EDID);
+  //logger_info("------ fill big task [%08X]-----------", task->EDID);
 
   cache->last_edid = task->EDID;
 
@@ -1089,6 +1084,8 @@ static int get_tasks2(void *opaque, void *data) {
 
   if (task->PageChange && status->CurPage != task->PageChange) {
     over += fill_big_task(cache, task->EDID, 0x73, &task->PageChange, 1, 1, 1,task->Hour,task->Min,task->Sec,task->Day);
+
+    logger_info("------ fill big task [%08X]-----------", task->EDID);
   }
   if (task->LedMark && status->LEDMark != task->LedMark) {
     uint8_t tmpbuf[] = {
@@ -1105,6 +1102,8 @@ static int get_tasks2(void *opaque, void *data) {
     uint16_t pkt_size = MEM_SIZE(BigTask, data);;
     uint8_t slice_num = (uint8_t)ceil((float)strlen(task->NFCData) / pkt_size);
     over += fill_big_task(cache, task->EDID, 0x72, task->NFCData, strlen(task->NFCData), slice_num, 1,task->Hour,task->Min,task->Sec,task->Day);
+
+    logger_info("------ fill big task [%08X]-----------", task->EDID);
   }
 
   uint8_t X = 0;
@@ -1170,6 +1169,8 @@ static int get_tasks2(void *opaque, void *data) {
         blob->nLen - pkt_size * cache->which.block, \
         slice_num,									\
         (cache->which.block + 1),task->Hour,task->Min,task->Sec,task->Day);
+
+    logger_info("------ fill big task [%08X]-----------", task->EDID);
 
     if (over != 0 && !node) { // 填充了一部分
       // over = 0 说明数据全部填充成功, != 0 说明填充了一部分

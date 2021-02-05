@@ -20,6 +20,8 @@
 #include "up_packet.h"
 
 
+//static unsigned int NumOfSuccess = 0;
+
 //#define MAX_EXPIRED_TIME  (24*60*60) //24 Hour
 #define MAX_EXPIRED_TIME  (168*60*60) //24 Hour
 #define MAX_SCAN_NUM      256
@@ -409,6 +411,7 @@ int query_task(void *opaque, void *data) {
     && (status->TaskTimeMark3 == task->Min)&& (status->TaskTimeMark4 == task->Sec))
     {
     	frame[index++] = 1;
+    	//NumOfSuccess++;
     	task->SuccessFlag = 1;
     }
     else {
@@ -935,9 +938,15 @@ UpPacket *analysis_tcp_data(u8_t *data, unsigned int size, TcpContext *TcpCtx) {
       prop.frame = resp_head->data + sizeof(uint16_t);
       prop.index = 0;
       prop.task_num = 0;
+
+      //NumOfSuccess = 0;
+
       rwlock_rdlock();
       traverse_ed_task(&TcpCtx->last_edid, query_task, &prop);
       rwlock_unlock();
+
+      //logger_info("==============Count Task Succes: %d ==============", NumOfSuccess);
+
       TcpCtx->last_edid = prop.last_edid;
       if (prop.task_num != MAX_NUM_OF_TASK)
         TcpCtx->last_edid = 0;
