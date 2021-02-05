@@ -70,9 +70,7 @@ static void prepare(const char *dbname) {
     SystemConf->BACK3 = 0xac;
     SystemConf->StationVer = 0x4b;
     SystemConf->SubPicSize = 4096;
-    //SystemConf->Type = 0x05;
-    //SystemConf->Mark = 0x06;
-    //SystemConf->Num  = 10;
+
 
     SystemConf->MAC = realloc(SystemConf->MAC, 18);
     unsigned char mac[6];
