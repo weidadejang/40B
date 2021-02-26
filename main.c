@@ -100,8 +100,9 @@ void sig_handler(int sig) {
 int main(int argc, const char **argv)
 {
   time_t last_update = time(NULL);
-  const char *dev[] = { "/dev/spidev0.0" ,"/dev/spidev2.0","/dev/spidev3.0","/dev/spidev1.0" }; // 先用一个进行测试
+  //const char *dev[] = { "/dev/spidev0.0" ,"/dev/spidev2.0","/dev/spidev3.0","/dev/spidev1.0" }; // 先用一个进行测试
   //const char *dev[] = {"/dev/spidev3.0"};
+  const char *dev[] = {"/dev/spidev0.0","/dev/spidev1.0"};
 
   if (argc < 2) {
     printf("Usage: %s dbfile [daemon]\n", argv[0]);
@@ -126,10 +127,10 @@ int main(int argc, const char **argv)
   signal(SIGTERM, sig_handler);
   signal(SIGUSR1, sig_handler);
 
-  start_serial_tasks(sizeof(dev)/sizeof(dev[0]), dev);
-  start_debug_task();
-  start_gpio_task();
-  start_net_task();
+  //start_serial_tasks(sizeof(dev)/sizeof(dev[0]), dev);
+  //start_debug_task();
+  //start_gpio_task();
+  //start_net_task();
 
   while (!restart) {
     time_t now = time(NULL);

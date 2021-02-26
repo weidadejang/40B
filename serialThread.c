@@ -360,14 +360,15 @@ static int spi_transfer(int fd, const uint8_t *tx, uint8_t *rx, size_t len)
 {
 	struct spi_ioc_transfer tr;
 	memset(&tr, 0, sizeof(tr));
-	//logger_hexbuf("SPI TX", tx, len);
+
+	logger_hexbuf("SPI TX", tx, len);
 	tr.tx_buf = (unsigned long)(tx);
 	tr.rx_buf = (unsigned long)(rx);
 	tr.len = len;
 	if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 0) { // 射频芯片不回复时返回什么？
 	return -1;
 	}
-	//logger_hexbuf("SPI RX", (const char*)rx, len);
+	logger_hexbuf("SPI RX", (const char*)rx, len);
 	return 0;
 }
 
@@ -428,8 +429,8 @@ void spidev_reset(const char *dev)
 
 int ReadSPIRegs(const char *dev_name, SPI_REG_OPT *SpiRegList, size_t size) {
   char filename[64] = {0};
-  //snprintf(filename, sizeof(filename), "./regs/%s", dev_name);
-  snprintf(filename, sizeof(filename), "/root/regs/%s", dev_name);
+  snprintf(filename, sizeof(filename), "./regs/%s", dev_name);
+  //snprintf(filename, sizeof(filename), "/root/regs/%s", dev_name);
   FILE *fp = fopen(filename, "r");
   if (!fp) return -1;
 
@@ -1170,7 +1171,7 @@ static int get_tasks2(void *opaque, void *data) {
         slice_num,									\
         (cache->which.block + 1),task->Hour,task->Min,task->Sec,task->Day);
 
-    logger_info("------ fill big task [%08X]-----------", task->EDID);
+    logger_info("------ fill big task EDID:[%08X]--[%d]-----------", task->EDID, task->EDID);
 
     if (over != 0 && !node) { // 填充了一部分
       // over = 0 说明数据全部填充成功, != 0 说明填充了一部分
